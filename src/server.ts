@@ -7,6 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import path from "node:path";
 import { ServerContext } from "./core/context.js";
 import { registerAnalyzeComplexity } from "./tools/analyzeComplexity.js";
+import { registerApiSurface } from "./tools/apiSurface.js";
 import { registerCallGraph } from "./tools/callGraph.js";
 import { registerDetectCircularDeps } from "./tools/detectCircularDeps.js";
 import { registerFindDeadFiles } from "./tools/findDeadFiles.js";
@@ -59,8 +60,9 @@ export function createServer(opts: CreateServerOptions): McpServer {
         "get_file_outline for shape, find_references for usages, search_ast for structural patterns and code smells, " +
         "analyze_complexity for refactor targets, summarize_module for a file's imports/exports/dependencies, " +
         "find_unused_exports for dead public surface, find_dead_files for orphan modules (files no one imports), " +
-        "call_graph for function call relationships, import_graph for module import/export resolution edges, and " +
-        "detect_circular_deps for circular import dependencies (cycles in the module graph). " +
+        "call_graph for function call relationships, import_graph for module import/export resolution edges, " +
+        "detect_circular_deps for circular import dependencies (cycles in the module graph), and " +
+        "api_surface for a package's public API (the symbols reachable from its entry points, with signatures). " +
         "All paths are relative to the configured project root; node_modules and build output are ignored automatically."
     }
   );
@@ -78,6 +80,7 @@ export function createServer(opts: CreateServerOptions): McpServer {
   registerCallGraph(server, ctx);
   registerImportGraph(server, ctx);
   registerDetectCircularDeps(server, ctx);
+  registerApiSurface(server, ctx);
 
   return server;
 }
