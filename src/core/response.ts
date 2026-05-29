@@ -17,8 +17,15 @@ export enum ResponseFormat {
 /**
  * Build a successful tool result. The structured object is always attached as
  * `structuredContent`; the text content is either pretty JSON or a caller-
- * supplied markdown rendering. If the text exceeds CHARACTER_LIMIT it is
- * replaced with a compact notice pointing the agent at narrowing options.
+ * supplied markdown rendering. If the rendered TEXT exceeds CHARACTER_LIMIT it
+ * is replaced with a compact notice pointing the agent at narrowing options.
+ *
+ * Important: only the human-facing TEXT is summarized in that case — the
+ * `structuredContent` always carries the complete structured payload. The text
+ * summarization is signalled with `responseTextTruncated` (a presentation flag)
+ * rather than `truncated`, so it never collides with a tool's own data-level
+ * `truncated` field (e.g. call_graph capping nodes+edges). Conflating the two
+ * made fully-complete structured results look as if data were dropped.
  */
 export function toolResult(
   structured: Record<string, unknown>,
@@ -36,14 +43,16 @@ export function toolResult(
       opts.narrowHint ??
       "Narrow the scope (target a specific file or directory, lower the limit, or add filters) to see full results.";
     const notice = {
-      truncated: true,
-      message: `Response exceeded the ${CHARACTER_LIMIT}-character limit and was summarized. ${hint}`,
+      responseTextTruncated: true,
+      message: `Text response exceeded the ${CHARACTER_LIMIT}-character limit and was summarized; the full result is in structuredContent. ${hint}`,
       summary: summarize(structured)
     };
     text = JSON.stringify(notice, null, 2);
     return {
       content: [{ type: "text", text }],
-      structuredContent: { ...structured, truncated: true, truncationHint: hint }
+      // Preserve the complete structured payload (including any tool-set
+      // `truncated` flag) and add a distinct presentation-level marker.
+      structuredContent: { ...structured, responseTextTruncated: true, truncationHint: hint }
     };
   }
 

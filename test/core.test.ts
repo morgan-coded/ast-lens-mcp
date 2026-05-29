@@ -18,9 +18,16 @@ import {
   exportedSymbols,
   fileOutline,
   listSymbols,
-  reexportedOriginNames
+  reexportedOriginNames,
+  starReexportSources
 } from "../src/core/extract.js";
 import { ServerContext } from "../src/core/context.js";
+import { CHARACTER_LIMIT, ResponseFormat, toolResult } from "../src/core/response.js";
+import {
+  expandEntryToSourceCandidates,
+  resolvePackageEntryPoints,
+  resolveRelativeSpecifier
+} from "../src/core/entryPoints.js";
 import { FIXTURE_ROOT, fixturePath } from "./helpers.js";
 
 describe("parser", () => {
@@ -387,5 +394,204 @@ describe("symlink sandbox escape", () => {
   it("loadBatch refuses to read a secret through an in-root symlink", async () => {
     const ctx = new ServerContext(root);
     await expect(ctx.loadBatch("src/link/secret.ts")).rejects.toBeInstanceOf(PathEscapeError);
+  });
+});
+
+describe("package entry-point resolution", () => {
+  it("maps a dist build-output entry back to likely source candidates", () => {
+    const cands = expandEntryToSourceCandidates("dist/index.js");
+    // literal kept, source-dir rebased, TS extensions added, .d.ts considered.
+    expect(cands).toContain("dist/index.js");
+    expect(cands).toContain("src/index.ts");
+    expect(cands).toContain("src/index.d.ts");
+    expect(cands).toContain("source/index.ts");
+    expect(cands).toContain("index.ts"); // build dir stripped, no source dir
+  });
+
+  it("maps a nested build path preserving the subpath", () => {
+    const cands = expandEntryToSourceCandidates("dist/cli/main.mjs");
+    expect(cands).toContain("src/cli/main.ts");
+    expect(cands).toContain("src/cli/main.mts");
+    expect(cands).toContain("dist/cli/main.mjs");
+  });
+
+  it("keeps a source entry (src/api.ts) as-is without inventing build dirs", () => {
+    const cands = expandEntryToSourceCandidates("src/api.ts");
+    expect(cands).toContain("src/api.ts");
+    // It is not under a build dir, so we only keep the body+TS ext, not rebased
+    // copies under other source dirs.
+    expect(cands).not.toContain("dist/api.ts");
+  });
+
+  it("keeps a .d.ts types entry verbatim (type-fest style)", () => {
+    const cands = expandEntryToSourceCandidates("index.d.ts");
+    expect(cands).toContain("index.d.ts");
+  });
+
+  it("returns not-found for a directory with no package.json", async () => {
+    const res = await resolvePackageEntryPoints(fixturePath());
+    // sample-project fixture has no package.json.
+    expect(res.found).toBe(false);
+    expect(res.declared).toEqual([]);
+    expect(res.sourceCandidates).toEqual([]);
+  });
+
+  it("reads main/module/bin/exports from a temp package.json without throwing", async () => {
+    const base = await fs.realpath(os.tmpdir());
+    const dir = path.join(base, `ast-lens-pkg-${process.pid}-${Date.now()}`);
+    await fs.mkdir(dir, { recursive: true });
+    try {
+      await fs.writeFile(
+        path.join(dir, "package.json"),
+        JSON.stringify({
+          name: "demo",
+          main: "./dist/index.js",
+          module: "./dist/index.mjs",
+          bin: { demo: "./dist/cli.js" },
+          exports: {
+            ".": { types: "./dist/index.d.ts", import: "./dist/index.mjs", require: "./dist/index.cjs" },
+            "./feature": "./dist/feature.js"
+          }
+        })
+      );
+      const res = await resolvePackageEntryPoints(dir);
+      expect(res.found).toBe(true);
+      // Declared paths normalized (leading ./ stripped). The `types` condition
+      // value is collected too — a .d.ts entry is a real public-API root.
+      expect(res.declared).toEqual(
+        expect.arrayContaining([
+          "dist/index.js",
+          "dist/index.mjs",
+          "dist/cli.js",
+          "dist/index.cjs",
+          "dist/feature.js",
+          "dist/index.d.ts"
+        ])
+      );
+      // Source candidates include mapped-back forms for matching against src.
+      expect(res.sourceCandidates).toEqual(
+        expect.arrayContaining(["src/index.ts", "src/cli.ts", "src/feature.ts"])
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not throw on malformed package.json", async () => {
+    const base = await fs.realpath(os.tmpdir());
+    const dir = path.join(base, `ast-lens-pkg-bad-${process.pid}-${Date.now()}`);
+    await fs.mkdir(dir, { recursive: true });
+    try {
+      await fs.writeFile(path.join(dir, "package.json"), "{ not valid json ");
+      const res = await resolvePackageEntryPoints(dir);
+      expect(res.found).toBe(false);
+      expect(res.sourceCandidates).toEqual([]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("relative-specifier resolution + star re-export sources", () => {
+  const known = new Set([
+    "src/main.ts",
+    "src/api.ts",
+    "src/dynamic.ts",
+    "src/lib/aliased.ts",
+    "src/features/index.ts"
+  ]);
+
+  it("resolves a sibling relative specifier with extension inference", () => {
+    expect(resolveRelativeSpecifier("src/main.ts", "./api", known)).toBe("src/api.ts");
+    expect(resolveRelativeSpecifier("src/main.ts", "./dynamic", known)).toBe("src/dynamic.ts");
+  });
+
+  it("resolves a nested-path specifier and a directory index", () => {
+    expect(resolveRelativeSpecifier("src/main.ts", "./lib/aliased", known)).toBe("src/lib/aliased.ts");
+    // `./features` -> features/index.ts
+    expect(resolveRelativeSpecifier("src/main.ts", "./features", known)).toBe("src/features/index.ts");
+  });
+
+  it("returns undefined for bare package specifiers and out-of-scope targets", () => {
+    expect(resolveRelativeSpecifier("src/main.ts", "react", known)).toBeUndefined();
+    expect(resolveRelativeSpecifier("src/main.ts", "./nope", known)).toBeUndefined();
+    expect(resolveRelativeSpecifier("src/main.ts", "../../escape", known)).toBeUndefined();
+  });
+
+  it("extracts only bare `export *` sources (not named re-exports)", () => {
+    const r = parseCode(
+      [
+        'export * from "./a";',
+        'export { x } from "./b";', // named — not a star
+        'export * as ns from "./c";', // namespace star — not a bare star
+        'export * from "./d";'
+      ].join("\n"),
+      "m.ts"
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(starReexportSources(r.value.ast).sort()).toEqual(["./a", "./d"]);
+  });
+});
+
+describe("toolResult character-limit handling", () => {
+  it("attaches the full structured payload below the limit", () => {
+    const res = toolResult({ a: 1, items: [1, 2, 3] }, { format: ResponseFormat.JSON });
+    expect(res.structuredContent).toEqual({ a: 1, items: [1, 2, 3] });
+    expect((res.structuredContent as { responseTextTruncated?: boolean }).responseTextTruncated).toBeUndefined();
+  });
+
+  it("summarizes only the TEXT when over the limit, keeping structuredContent complete", () => {
+    // Build a payload whose JSON rendering exceeds CHARACTER_LIMIT but whose
+    // structured data is fully retained.
+    const big = Array.from({ length: 5000 }, (_, i) => ({ id: `node-${i}`, v: i }));
+    const res = toolResult(
+      { nodeCount: big.length, truncated: false, nodes: big },
+      { format: ResponseFormat.JSON, narrowHint: "Narrow it." }
+    );
+    const sc = res.structuredContent as {
+      truncated: boolean;
+      responseTextTruncated: boolean;
+      nodes: unknown[];
+    };
+    // The tool's own data-level flag is preserved (NOT clobbered to true)...
+    expect(sc.truncated).toBe(false);
+    // ...and the complete node list is still present in structuredContent.
+    expect(sc.nodes).toHaveLength(5000);
+    // The presentation-only flag marks that the TEXT was summarized.
+    expect(sc.responseTextTruncated).toBe(true);
+    // The text content is the compact notice, not the full payload.
+    const text = (res.content[0] as { text: string }).text;
+    expect(text.length).toBeLessThan(CHARACTER_LIMIT);
+    expect(text).toContain("responseTextTruncated");
+    expect(text).toContain("structuredContent");
+  });
+});
+
+describe("entry-point default covers .d.ts barrels (regression)", () => {
+  it("resolves a top-level `types` field as a public-API root", async () => {
+    const base = await fs.realpath(os.tmpdir());
+    const dir = path.join(base, `ast-lens-dts-${process.pid}-${Date.now()}`);
+    await fs.mkdir(dir, { recursive: true });
+    try {
+      // type-fest shape: types-only package, no runtime main.
+      await fs.writeFile(
+        path.join(dir, "package.json"),
+        JSON.stringify({
+          name: "types-pkg",
+          types: "./index.d.ts",
+          exports: { ".": { types: "./index.d.ts" }, "./globals": { types: "./source/globals/index.d.ts" } }
+        })
+      );
+      const res = await resolvePackageEntryPoints(dir);
+      expect(res.found).toBe(true);
+      // The declaration entries are recognized as roots (top-level `types` and
+      // the per-subpath `types` condition both collected).
+      expect(res.declared).toEqual(
+        expect.arrayContaining(["index.d.ts", "source/globals/index.d.ts"])
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });

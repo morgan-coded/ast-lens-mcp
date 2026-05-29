@@ -9,13 +9,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ServerContext } from "../core/context.js";
-import { countNameUsages, exportedSymbols, reexportedOriginNames } from "../core/extract.js";
+import { resolvePackageEntryPoints, resolveRelativeSpecifier } from "../core/entryPoints.js";
+import {
+  countNameUsages,
+  exportedSymbols,
+  reexportedOriginNames,
+  starReexportSources
+} from "../core/extract.js";
 import { ResponseFormat, errorResult, toolResult } from "../core/response.js";
 import type { UnusedExportInfo } from "../core/types.js";
 import { ignoreSchema, responseFormatSchema, targetSchema } from "./shared.js";
 
-/** Default globs whose exports are treated as intentional public API (not flagged). */
-const DEFAULT_ENTRY_POINTS = ["**/index.{ts,tsx,js,jsx,mts,cts,mjs,cjs}"];
+/** Default globs whose exports are treated as intentional public API (not
+ * flagged). Includes TypeScript declaration entries (`index.d.ts` and friends),
+ * since `.d.ts`-only packages (e.g. type-fest) expose their whole surface from a
+ * declaration barrel — without this their re-exported types are wrongly flagged. */
+const DEFAULT_ENTRY_POINTS = [
+  "**/index.{ts,tsx,js,jsx,mts,cts,mjs,cjs}",
+  "**/index.d.{ts,mts,cts}"
+];
 
 const inputSchema = z
   .object({
@@ -29,7 +41,13 @@ const inputSchema = z
       .array(z.string())
       .optional()
       .describe(
-        'Globs whose exports are considered intentional public API and never flagged. Defaults to ["**/index.*"]. Pass [] to flag everything.'
+        'Globs whose exports are considered intentional public API and never flagged. Defaults to ["**/index.*"]. Pass [] to flag everything (note: package.json entry points are still honored unless usePackageEntryPoints=false).'
+      ),
+    usePackageEntryPoints: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Also seed public-API roots from the project's package.json (main/module/bin/exports). Declared entries that point at build output (e.g. dist/index.js) are mapped back to their likely source files (src/index.ts, .d.ts, ...). Set false to rely only on 'entryPoints' globs. Default: true."
       ),
     includeReexports: z
       .boolean()
@@ -63,13 +81,14 @@ This is a fast, dependency-free, NAME-BASED reachability check (the same engine 
 IMPORTANT assumptions & limits (name-based):
   - Usage is only detected WITHIN 'target'. Symbols consumed by code outside the scanned scope (tests, apps, other packages) will show as unused — scope to a self-contained project/package.
   - Two different symbols that share a name are conflated: any same-named reference anywhere counts as a use, so this errs toward FALSE NEGATIVES (under-reporting). Treat hits as high-confidence, misses as best-effort.
-  - Exports from entry-point files (default "**/index.*") are treated as intentional public API and not flagged. Override with 'entryPoints'.
+  - Exports from entry-point files are treated as intentional public API and not flagged. Entry points come from BOTH the 'entryPoints' globs (default "**/index.*") AND the project's package.json (main/module/bin/exports), since the real public surface is what the manifest exposes. Declared entries pointing at build output (e.g. "dist/index.js") are mapped back to likely source files ("src/index.ts", ".d.ts", same-name variants). Disable the manifest source with usePackageEntryPoints=false; override the globs with 'entryPoints'.
   - Re-exports that forward another module (\`export { x } from "./y"\`) are skipped (not declared here). Bare \`export * from "..."\` cannot be name-checked; include it with includeReexports=true to see it flagged as a caveat.
   - Dynamic access (string-keyed property lookup, \`require\` interop, reflection) is invisible to a syntactic check.
 
 Args:
   - target (string): scope to analyze and search within (default: whole project).
-  - entryPoints (string[], optional): globs whose exports are never flagged (default ["**/index.*"]). Pass [] to flag everything.
+  - entryPoints (string[], optional): globs whose exports are never flagged (default ["**/index.*"]). Pass [] to flag everything (package.json entries still apply unless usePackageEntryPoints=false).
+  - usePackageEntryPoints (boolean): also treat package.json main/module/bin/exports as public-API roots (default true).
   - includeReexports (boolean): also report bare \`export *\` re-exports as caveats (default false).
   - ignore (string[], optional): extra ignore globs.
   - limit (number): max results, 1-2000 (default 500).
@@ -85,7 +104,8 @@ Returns (JSON):
     "unused": [
       { "file": string, "name": string, "exportKind": "named"|"default", "reexport": boolean, "span": {...} }
     ],
-    "entryPoints": string[],      // globs treated as public API
+    "entryPoints": string[],          // globs treated as public API
+    "packageEntryPoints": string[],   // entries discovered in package.json (root-relative)
     "parseErrors": [...]
   }
 
@@ -104,7 +124,60 @@ Examples:
       try {
         const batch = await ctx.loadBatch(input.target, input.ignore ? { ignore: input.ignore } : undefined);
         const entryPoints = input.entryPoints ?? DEFAULT_ENTRY_POINTS;
-        const entryMatchers = entryPoints.map(globToRegExp);
+
+        // Public-API roots from package.json (main/module/bin/exports), mapped
+        // from declared build output back to likely source files. These augment
+        // the glob entryPoints so a real entry that is NOT an index.* file (and
+        // anything it re-exports) is treated as public API, not dead code.
+        let pkgEntryCandidates: string[] = [];
+        let pkgDeclared: string[] = [];
+        if (input.usePackageEntryPoints) {
+          const resolution = await resolvePackageEntryPoints(ctx.root);
+          pkgEntryCandidates = resolution.sourceCandidates;
+          pkgDeclared = resolution.declared;
+        }
+
+        const entryMatchers = [
+          ...entryPoints.map(globToRegExp),
+          ...pkgEntryCandidates.map(globToRegExp)
+        ];
+
+        // Index the batch by display path + map display->ast so we can resolve
+        // bare `export *` targets to concrete in-scope files.
+        const astByDisplay = new Map<string, (typeof batch.parsed)[number]["ast"]>();
+        const knownPaths = new Set<string>();
+        for (const parsed of batch.parsed) {
+          const display = ctx.display(parsed.file);
+          astByDisplay.set(display, parsed.ast);
+          knownPaths.add(display);
+        }
+
+        // Determine the set of ENTRY FILES: files matched by the entry matchers,
+        // PLUS the transitive closure of modules they re-export wholesale via
+        // `export * from "./x"`. A bare star re-export forwards every symbol of
+        // its target, so a module star-re-exported by a public entry point is
+        // itself public API (its exports must not be flagged). Resolve such
+        // targets to in-scope files and fold them into the entry set, repeating
+        // until no new entry files are discovered (handles chained star
+        // re-exports). Named/star-target modules outside scope simply don't
+        // resolve and are skipped (documented limit).
+        const entryFiles = new Set<string>();
+        for (const display of knownPaths) {
+          if (entryMatchers.some((re) => re.test(display))) entryFiles.add(display);
+        }
+        const queue = [...entryFiles];
+        while (queue.length > 0) {
+          const file = queue.shift()!;
+          const ast = astByDisplay.get(file);
+          if (!ast) continue;
+          for (const spec of starReexportSources(ast)) {
+            const target = resolveRelativeSpecifier(file, spec, knownPaths);
+            if (target && !entryFiles.has(target)) {
+              entryFiles.add(target);
+              queue.push(target);
+            }
+          }
+        }
 
         // Phase 1: collect every candidate export (skipping entry points) keyed
         // by file, and the union of all exported names to scan usages for.
@@ -125,7 +198,7 @@ Examples:
 
         for (const parsed of batch.parsed) {
           const display = ctx.display(parsed.file);
-          if (entryMatchers.some((re) => re.test(display))) {
+          if (entryFiles.has(display)) {
             for (const name of reexportedOriginNames(parsed.ast)) entryReexportedNames.add(name);
             continue;
           }
@@ -198,6 +271,10 @@ Examples:
           truncated: total > returned.length,
           unused: returned,
           entryPoints,
+          // Entry points discovered in package.json (main/module/bin/exports),
+          // normalized to root-relative paths; empty when none/disabled. Their
+          // exports + re-exports are treated as public API roots.
+          packageEntryPoints: pkgDeclared,
           parseErrors: batch.parseErrors,
           ...(batch.truncated ? { discoveryTruncated: true } : {})
         };

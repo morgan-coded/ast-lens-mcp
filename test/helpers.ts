@@ -11,6 +11,14 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 /** Absolute path to the sample fixture project root. */
 export const FIXTURE_ROOT = path.join(here, "fixtures", "sample-project");
 
+/**
+ * Absolute path to the package-aware fixture root: a small project with a
+ * package.json declaring a non-index entry (dist/main.js), a tsconfig path
+ * alias, circular deps, dynamic imports, type-only exports, and a nested
+ * sub-package. Used to exercise entry-point resolution + edge cases.
+ */
+export const PKG_FIXTURE_ROOT = path.join(here, "fixtures", "pkg-project");
+
 /** A ServerContext scoped to the fixture project (for unit-testing core/tools directly). */
 export function fixtureContext(): ServerContext {
   return new ServerContext(FIXTURE_ROOT);
@@ -19,6 +27,11 @@ export function fixtureContext(): ServerContext {
 /** Resolve a path inside the fixture project. */
 export function fixturePath(...parts: string[]): string {
   return path.join(FIXTURE_ROOT, ...parts);
+}
+
+/** Resolve a path inside the package-aware fixture project. */
+export function pkgFixturePath(...parts: string[]): string {
+  return path.join(PKG_FIXTURE_ROOT, ...parts);
 }
 
 export interface ConnectedClient {

@@ -415,6 +415,25 @@ export function reexportedOriginNames(ast: t.File): string[] {
 }
 
 /**
+ * Module specifiers this file forwards via a bare `export * from "./x"`. Each
+ * such target re-exports ALL of the source module's symbols, so when the
+ * forwarding file is a public entry point, the target module's exports are
+ * transitively public API too. Returned as written (e.g. "./dynamic"); the
+ * caller resolves them to concrete files. Named `export * as ns from "./x"`
+ * binds a single namespace name (handled by reexportedOriginNames-style logic),
+ * so only the unnamed `ExportAllDeclaration` is collected here.
+ */
+export function starReexportSources(ast: t.File): string[] {
+  const out: string[] = [];
+  for (const stmt of ast.program.body) {
+    if (t.isExportAllDeclaration(stmt)) {
+      out.push(stmt.source.value);
+    }
+  }
+  return out;
+}
+
+/**
  * Count "real" usages of each name in `names` within one AST, where a real
  * usage is any identifier occurrence that is NOT a declaration site and NOT an
  * import/export binding. This mirrors find_references' classification but is
