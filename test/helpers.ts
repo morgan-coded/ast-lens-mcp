@@ -19,6 +19,14 @@ export const FIXTURE_ROOT = path.join(here, "fixtures", "sample-project");
  */
 export const PKG_FIXTURE_ROOT = path.join(here, "fixtures", "pkg-project");
 
+/**
+ * Absolute path to the circular-dependency fixture root: a project containing a
+ * 2-module cycle, a 3-module cycle, an acyclic chain, a self-import, a
+ * tsconfig-path-aliased cycle, and a dynamic-import-only cycle. Used to exercise
+ * detect_circular_deps.
+ */
+export const CYCLE_FIXTURE_ROOT = path.join(here, "fixtures", "cycle-project");
+
 /** A ServerContext scoped to the fixture project (for unit-testing core/tools directly). */
 export function fixtureContext(): ServerContext {
   return new ServerContext(FIXTURE_ROOT);
