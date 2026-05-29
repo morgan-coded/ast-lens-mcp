@@ -70,6 +70,19 @@ describe("list_symbols", () => {
     expect(names).not.toContain("UserService"); // not a function
   });
 
+  it("reports renamed and ambient exports correctly (exportedOnly keeps them)", async () => {
+    const res = await call("list_symbols", { target: "src/edge.ts", exportedOnly: true });
+    const data = structured<{ files: { symbols: { name: string; exported: boolean; kind: string }[] }[] }>(res);
+    const names = data.files.flatMap((f) => f.symbols.map((s) => s.name));
+    // `export { renameMe as publicValue }` — renameMe must survive exportedOnly.
+    expect(names).toContain("renameMe");
+    expect(names).toContain("renameFn");
+    // `export declare function ambientExported` must appear.
+    expect(names).toContain("ambientExported");
+    // Local ambient is NOT exported, so it must be filtered out here.
+    expect(names).not.toContain("ambientLocal");
+  });
+
   it("never includes node_modules files even when scanning the whole project", async () => {
     // The fixture has node_modules/ignored-pkg/index.ts; scanning "**/*.ts" from
     // the root must still exclude it (proves active ignoring, not mere absence).
@@ -253,6 +266,20 @@ describe("search_ast", () => {
     const res = await call("search_ast", { query: "node_type", target: "src/smelly.ts" });
     expect(res.isError).toBe(true);
     expect((res.content[0] as { text: string }).text).toMatch(/nodeType/i);
+  });
+
+  it("calls_to and console_usage catch optional-chained calls (logger?.log(), console?.log())", async () => {
+    // edge.ts has `logger?.log("hi")` and `console?.log("...")` — both via `?.`.
+    const logCalls = structured<{ total: number; matches: { detail?: string }[] }>(
+      await call("search_ast", { query: "calls_to", callee: "log", target: "src/edge.ts" })
+    );
+    expect(logCalls.total).toBeGreaterThanOrEqual(2); // logger?.log AND console?.log
+
+    const consoleHits = structured<{ total: number; matches: { detail?: string }[] }>(
+      await call("search_ast", { query: "console_usage", target: "src/edge.ts" })
+    );
+    expect(consoleHits.total).toBe(1); // console?.log via optional chaining
+    expect(consoleHits.matches[0]?.detail).toBe("console.log");
   });
 });
 

@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import os from "node:os";
 import path from "node:path";
+import { promises as fs } from "node:fs";
 import { parseCode, ParserCache, isSupportedFile } from "../src/core/parser.js";
 import {
+  assertRealPathInside,
   discoverFiles,
   isInside,
   PathEscapeError,
@@ -9,6 +12,8 @@ import {
   toDisplayPath
 } from "../src/core/files.js";
 import { analyzeAllFunctions } from "../src/core/traverse.js";
+import { listSymbols, fileOutline } from "../src/core/extract.js";
+import { ServerContext } from "../src/core/context.js";
 import { FIXTURE_ROOT, fixturePath } from "./helpers.js";
 
 describe("parser", () => {
@@ -158,5 +163,125 @@ describe("cyclomatic complexity", () => {
       const fns2 = analyzeAllFunctions(result.value.ast, 5);
       expect(fns2[0]?.overThreshold).toBe(false);
     }
+  });
+
+  it("counts nullish-coalescing and optional chaining as decision points", () => {
+    // base 1 + ?? 1 + a?.b (optional member) 1 = 3
+    const a = parseCode(`function f(x:any){ return (x ?? 0) + (x?.y); }`, "c.ts");
+    if (a.ok) {
+      const [fn] = analyzeAllFunctions(a.value.ast, 10);
+      expect(fn?.complexity).toBe(3);
+    }
+    // switch with 3 non-default cases + default => base 1 + 3 = 4
+    const b = parseCode(`function g(n:number){ switch(n){ case 1: case 2: case 3: break; default: break; } }`, "c.ts");
+    if (b.ok) {
+      const [fn] = analyzeAllFunctions(b.value.ast, 10);
+      expect(fn?.complexity).toBe(4);
+    }
+  });
+});
+
+describe("symbol extraction edge cases", () => {
+  function symbolsOf(code: string) {
+    const r = parseCode(code, "t.ts");
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("parse failed");
+    return listSymbols(r.value.ast);
+  }
+
+  it("reports renamed named exports (`export { a as b }`) as exported", () => {
+    const syms = symbolsOf("const a = 1;\nfunction h(){}\nexport { a as publicValue, h as publicFn };");
+    const a = syms.find((s) => s.name === "a");
+    const h = syms.find((s) => s.name === "h");
+    expect(a?.exported).toBe(true);
+    expect(a?.exportKind).toBe("named");
+    expect(h?.exported).toBe(true);
+    expect(h?.exportKind).toBe("named");
+  });
+
+  it("does NOT mark a re-export from another module as a local export", () => {
+    // `export { x } from "./y"` is not a local declaration; a local `x` here must
+    // stay non-exported.
+    const syms = symbolsOf('const x = 1;\nexport { y } from "./other";');
+    const x = syms.find((s) => s.name === "x");
+    expect(x?.exported).toBe(false);
+  });
+
+  it("includes ambient `declare function` and `export declare function`", () => {
+    const syms = symbolsOf(
+      "export declare function ext(x: number): void;\ndeclare function localAmbient(): void;"
+    );
+    const ext = syms.find((s) => s.name === "ext");
+    const local = syms.find((s) => s.name === "localAmbient");
+    expect(ext?.kind).toBe("function");
+    expect(ext?.exported).toBe(true);
+    expect(local?.kind).toBe("function");
+    expect(local?.exported).toBe(false);
+  });
+
+  it("surfaces an anonymous `export default class {}` as a default symbol with members", () => {
+    const r = parseCode("export default class { static make(){} go(){} }", "t.ts");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const syms = listSymbols(r.value.ast);
+    const def = syms.find((s) => s.name === "default");
+    expect(def?.kind).toBe("class");
+    expect(def?.exportKind).toBe("default");
+
+    const outline = fileOutline(r.value.ast);
+    const node = outline.find((n) => n.name === "default");
+    expect(node?.children?.map((c) => c.name)).toEqual(expect.arrayContaining(["make", "go"]));
+  });
+});
+
+describe("symlink sandbox escape", () => {
+  let root: string;
+  let outside: string;
+
+  beforeAll(async () => {
+    const base = await fs.realpath(os.tmpdir());
+    root = path.join(base, `ast-lens-test-root-${process.pid}-${Date.now()}`);
+    outside = path.join(base, `ast-lens-test-OUTSIDE-${process.pid}-${Date.now()}`);
+    await fs.mkdir(path.join(root, "src"), { recursive: true });
+    await fs.mkdir(outside, { recursive: true });
+    await fs.writeFile(path.join(root, "src", "ok.ts"), "export const ok = 1;");
+    await fs.writeFile(path.join(outside, "secret.ts"), "export const SECRET = 'leak';");
+    // A symlink that lives INSIDE root but points OUTSIDE it.
+    try {
+      await fs.symlink(outside, path.join(root, "src", "link"), "dir");
+    } catch {
+      // Some environments disallow symlinks; tests below tolerate absence.
+    }
+  });
+
+  afterAll(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  });
+
+  it("assertRealPathInside rejects a path whose real target escapes the root", async () => {
+    await expect(
+      assertRealPathInside(root, path.join(root, "src", "link", "secret.ts"))
+    ).rejects.toBeInstanceOf(PathEscapeError);
+  });
+
+  it("does not discover files reached through an out-of-root symlink (directory target)", async () => {
+    // Pointing at the symlinked directory itself is a deliberate escape: rejected.
+    await expect(discoverFiles({ root, target: "src/link" })).rejects.toBeInstanceOf(PathEscapeError);
+  });
+
+  it("does not discover an out-of-root file addressed through a symlink (file target)", async () => {
+    await expect(discoverFiles({ root, target: "src/link/secret.ts" })).rejects.toBeInstanceOf(PathEscapeError);
+  });
+
+  it("a project-wide glob never follows a symlink out of the root", async () => {
+    const { files } = await discoverFiles({ root, target: "**/*.ts" });
+    expect(files.some((f) => f.includes("OUTSIDE") || f.endsWith("secret.ts"))).toBe(false);
+    expect(files.map((f) => path.basename(f))).toContain("ok.ts");
+  });
+
+  it("loadBatch refuses to read a secret through an in-root symlink", async () => {
+    const ctx = new ServerContext(root);
+    await expect(ctx.loadBatch("src/link/secret.ts")).rejects.toBeInstanceOf(PathEscapeError);
   });
 });
