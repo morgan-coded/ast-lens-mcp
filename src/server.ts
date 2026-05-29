@@ -20,7 +20,7 @@ import { registerSearchAst } from "./tools/searchAst.js";
 import { registerSummarizeModule } from "./tools/summarizeModule.js";
 
 export const SERVER_NAME = "ast-lens-mcp-server";
-export const SERVER_VERSION = "0.1.0";
+export const SERVER_VERSION = "0.2.0";
 
 export interface CreateServerOptions {
   /** Absolute project root that all tools are confined to. */

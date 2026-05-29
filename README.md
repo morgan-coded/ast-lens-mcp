@@ -2,7 +2,7 @@
 
 > An MCP server that gives AI agents **structural understanding** of a TypeScript / JavaScript codebase — so an agent can *query* code structure instead of reading whole files into its context window.
 
-`ast-lens-mcp` parses your project with the Babel AST toolchain and exposes six focused, read-only tools over the [Model Context Protocol](https://modelcontextprotocol.io). Point it at a project root and an LLM client (Claude Desktop, Cursor, or anything that speaks MCP) can ask precise structural questions: *what symbols are exported here? where is this function called? which functions are too complex? what does this module import?* — all without paging entire files through the model.
+`ast-lens-mcp` parses your project with the Babel AST toolchain and exposes twelve focused, read-only tools over the [Model Context Protocol](https://modelcontextprotocol.io). Point it at a project root and an LLM client (Claude Desktop, Cursor, or anything that speaks MCP) can ask precise structural questions: *what symbols are exported here? where is this function called? which functions are too complex? what does this module import? what exports or files look dead? what does this package expose?* — all without paging entire files through the model.
 
 It runs entirely on your **local files**. No API keys, no network calls, no credentials.
 
@@ -16,7 +16,7 @@ It runs entirely on your **local files**. No API keys, no network calls, no cred
 
 Coding agents waste a lot of context re-reading files just to answer structural questions ("does this symbol exist?", "where is it used?", "what's the shape of this class?"). Those questions have *exact* answers that come from the AST, not from an approximate read. `ast-lens-mcp` turns them into cheap, deterministic tool calls that return small structured JSON — leaving more of the model's context for actual reasoning.
 
-It is deliberately **syntactic, not type-aware**: it parses, it does not type-check. That keeps it fast, dependency-light, and able to analyze a file in isolation (no `tsconfig` resolution, no whole-program build). `find_references` is therefore a precise *name-based* search classified by syntactic role, not a type-resolved rename index — see the note on that tool below.
+It is deliberately **syntactic, not type-aware**: it parses, it does not type-check. That keeps it fast, dependency-light, and able to analyze files without a whole-program build. Some graph tools read simple `tsconfig` path aliases for better module resolution, but name/reference tools stay name-based. `find_references` is therefore a precise *name-based* search classified by syntactic role, not a type-resolved rename index — see the note on that tool below.
 
 ---
 
@@ -101,6 +101,21 @@ All paths passed to tools are interpreted **relative to the project root** (or a
 ## Tools
 
 Every tool is read-only (`readOnlyHint: true`, `openWorldHint: false`), validates input with a strict zod schema, returns both human-readable text and machine-readable `structuredContent`, supports `response_format: "json" | "markdown"`, and never throws on bad input — parse failures come back as structured `parseErrors`.
+
+| # | Tool | Use it for |
+|---|---|---|
+| 1 | `list_symbols` | Top-level and exported symbols across files, folders, or globs |
+| 2 | `get_file_outline` | One-file class/interface/enum structure |
+| 3 | `find_references` | Name-based identifier references with syntactic context |
+| 4 | `search_ast` | Structural AST queries and common code smells |
+| 5 | `analyze_complexity` | Per-function cyclomatic complexity and LOC |
+| 6 | `summarize_module` | A file's imports, exports, and dependencies |
+| 7 | `find_unused_exports` | Exported symbols that appear unused outside their defining file |
+| 8 | `call_graph` | Function-to-function call relationships |
+| 9 | `import_graph` | Resolved module import, re-export, and dynamic-import edges |
+| 10 | `detect_circular_deps` | Circular dependencies in the module graph |
+| 11 | `find_dead_files` | Source files not reachable from package or index entry points |
+| 12 | `api_surface` | Public symbols reachable from a package or entry file |
 
 ### 1. `list_symbols`
 
@@ -276,6 +291,151 @@ One file's imports, exports, and dependencies — including static imports, re-e
 }
 ```
 
+### 7. `find_unused_exports`
+
+Candidate dead public surface: exported symbols that are never referenced from another file in the scanned scope. Package entry points and index barrels are treated as intentional public API by default.
+
+```jsonc
+// input
+{ "target": "src", "entryPoints": ["src/index.ts"] }
+
+// output (abridged)
+{
+  "scanned": 27,
+  "totalExports": 71,
+  "total": 4,
+  "unused": [
+    { "file": "src/internal.ts", "name": "debugOnly", "exportKind": "named", "reexport": false }
+  ],
+  "entryPoints": ["src/index.ts"],
+  "parseErrors": []
+}
+```
+
+This is name-based, not type-resolved. It is meant to produce a review list, not an automatic delete list.
+
+### 8. `call_graph`
+
+Function-to-function call relationships for a file, folder, or glob. Nodes are function-like definitions; edges are call sites from the enclosing function to the resolved callee when there is a clear name-based match.
+
+```jsonc
+// input
+{ "target": "src/core", "includeExternalCalls": false }
+
+// output (abridged)
+{
+  "nodeCount": 42,
+  "edgeCount": 67,
+  "unresolvedCallees": 12,
+  "nodes": [
+    { "id": "src/core/parser.ts#parseFile@28", "name": "parseFile", "file": "src/core/parser.ts", "kind": "function" }
+  ],
+  "edges": [
+    { "from": "src/core/parser.ts#parseFile@28", "callee": "parse", "to": "src/core/parser.ts#parse@11", "file": "src/core/parser.ts" }
+  ],
+  "parseErrors": []
+}
+```
+
+Set `includeExternalCalls: true` when you want calls to libraries, built-ins, or unresolved methods kept in the edge list with `to: null`.
+
+### 9. `import_graph`
+
+Resolved module-level imports, re-exports, dynamic imports, and `require()` calls. Relative paths, directory indexes, TS-ESM `.js` specifiers, and simple `tsconfig` path aliases are mapped to concrete in-scope files when possible.
+
+```jsonc
+// input
+{ "target": "src", "includeExternal": true }
+
+// output (abridged)
+{
+  "nodeCount": 27,
+  "edgeCount": 97,
+  "internalEdges": 97,
+  "externalCount": 11,
+  "unresolvedEdges": 0,
+  "nodes": [{ "id": "src/index.ts", "entry": true }],
+  "edges": [
+    { "from": "src/server.ts", "specifier": "./tools/listSymbols.js", "to": "src/tools/listSymbols.ts", "kind": "import", "resolution": "internal", "symbols": ["registerListSymbols"] }
+  ],
+  "parseErrors": []
+}
+```
+
+Scope matters: if the imported file is outside `target`, the edge is reported as unresolved.
+
+### 10. `detect_circular_deps`
+
+Circular import dependencies in the module graph, including self-imports. It is path-based and works from the same resolved graph model as `import_graph`.
+
+```jsonc
+// input
+{ "target": "src", "includeDynamic": true, "includeTypeOnly": true }
+
+// output (abridged)
+{
+  "scanned": 27,
+  "edgeCount": 97,
+  "cycleCount": 0,
+  "hasCycles": false,
+  "cycles": [],
+  "unresolvedLocal": [],
+  "parseErrors": []
+}
+```
+
+Use `includeTypeOnly: false` when type-only cycles are noise for the question you are asking.
+
+### 11. `find_dead_files`
+
+Candidate orphan modules: source files that are not reachable from package.json entries or index-style entry points. Results include why a file is suspicious and which unreachable files still import it.
+
+```jsonc
+// input
+{ "target": "src", "entryPoints": ["src/index.ts"] }
+
+// output (abridged)
+{
+  "scanned": 27,
+  "entryFileCount": 1,
+  "reachableCount": 27,
+  "total": 0,
+  "deadFiles": [],
+  "entryPoints": ["src/index.ts"],
+  "parseErrors": []
+}
+```
+
+Dynamic imports, test-only entry points, generated files, and assets can all change the interpretation, so treat the result as a triage list.
+
+### 12. `api_surface`
+
+The public API reachable from a package directory or a single entry file. It follows re-exports transitively and returns each public symbol with a best-effort source signature.
+
+```jsonc
+// input
+{ "target": "src/server.ts", "includeMembers": true }
+
+// output (abridged)
+{
+  "target": "src/server.ts",
+  "packageEntryPoints": [],
+  "entries": [
+    {
+      "entry": "src/server.ts",
+      "symbols": [
+        { "name": "createServer", "kind": "function", "exportKind": "named", "signature": "function createServer(opts: CreateServerOptions): McpServer", "declaredIn": "src/server.ts" }
+      ],
+      "unresolved": []
+    }
+  ],
+  "totalSymbols": 1,
+  "parseErrors": []
+}
+```
+
+Pass `target: "."` for a package root, or an explicit file such as `src/server.ts` when you want one entry file only.
+
 ---
 
 ## Architecture
@@ -289,12 +449,18 @@ src/
     files.ts          #   glob/dir/file discovery, node_modules ignore, path-traversal sandbox
     traverse.ts       #   shared traversal helpers + cyclomatic-complexity engine
     extract.ts        #   symbol / outline / module-summary extraction
+    entryPoints.ts    #   package entry and TS-ESM source-resolution helpers
+    importGraph.ts    #   resolved import/re-export graph builder
+    moduleGraph.ts    #   dependency-cycle graph helpers
+    signature.ts      #   best-effort source signature extraction
     context.ts        #   ServerContext: shared root + cache + batch loader
     response.ts       #   JSON/Markdown formatting, character-limit guard, error results
     types.ts          #   shared structured-output types
   tools/              # one file per tool, each exporting register<Tool>(server, ctx)
     listSymbols.ts  getFileOutline.ts  findReferences.ts
     searchAst.ts    analyzeComplexity.ts  summarizeModule.ts
+    findUnusedExports.ts  callGraph.ts  importGraph.ts
+    detectCircularDeps.ts  findDeadFiles.ts  apiSurface.ts
     shared.ts         #   shared zod schema fragments
 test/
   core.test.ts        # parser, cache, path-safety, complexity
@@ -318,7 +484,7 @@ Design notes:
 npm install
 npm run build        # bundle with tsup -> dist/index.js (executable, ESM)
 npm run typecheck    # tsc --noEmit, strict, over src + tests
-npm test             # vitest run (47 tests)
+npm test             # vitest run (178 tests)
 npm run smoke        # build first, then boot the server over stdio and call tools
 npm run dev          # tsx watch (run the server from source)
 ```

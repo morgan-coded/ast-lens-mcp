@@ -1,7 +1,7 @@
 {
   "name": "ast-lens-mcp",
-  "version": "0.1.0",
-  "description": "An MCP server that gives AI agents structural understanding of TypeScript/JavaScript codebases via AST analysis — list symbols, outline files, find references, run AST queries, measure complexity, and summarize modules without reading whole files.",
+  "version": "0.2.0",
+  "description": "An MCP server that gives AI agents structural understanding of TypeScript/JavaScript codebases via AST analysis, import graphs, dead-code checks, call graphs, and public API surface queries.",
   "type": "module",
   "license": "MIT",
   "author": "Morgan",
@@ -32,6 +32,7 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {
