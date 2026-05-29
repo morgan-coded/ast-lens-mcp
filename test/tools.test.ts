@@ -25,6 +25,7 @@ describe("server registration", () => {
         "analyze_complexity",
         "call_graph",
         "detect_circular_deps",
+        "find_dead_files",
         "find_references",
         "find_unused_exports",
         "get_file_outline",

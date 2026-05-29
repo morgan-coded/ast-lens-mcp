@@ -36,6 +36,14 @@ export const IMPORT_GRAPH_FIXTURE_ROOT = path.join(here, "fixtures", "import-gra
  */
 export const CYCLE_FIXTURE_ROOT = path.join(here, "fixtures", "cycle-project");
 
+/**
+ * Absolute path to the dead-files fixture root: a project exercising
+ * find_dead_files — an index entry, a package.json bin entry, statically and
+ * dynamically (literal) imported files, a tsconfig path alias, an orphan, a
+ * computed-dynamic-import target (unresolvable), and an unreachable cycle.
+ */
+export const DEAD_FILES_FIXTURE_ROOT = path.join(here, "fixtures", "dead-files-project");
+
 /** A ServerContext scoped to the fixture project (for unit-testing core/tools directly). */
 export function fixtureContext(): ServerContext {
   return new ServerContext(FIXTURE_ROOT);
