@@ -17,13 +17,14 @@ function call(name: string, args: Record<string, unknown>): Promise<CallToolResu
 }
 
 describe("server registration", () => {
-  it("lists all eight tools with schemas and annotations", async () => {
+  it("lists all nine tools with schemas and annotations", async () => {
     const { tools } = await conn.client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
         "analyze_complexity",
         "call_graph",
+        "find_dead_files",
         "find_references",
         "find_unused_exports",
         "get_file_outline",
