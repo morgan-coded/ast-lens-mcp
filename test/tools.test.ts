@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { connectClient, PKG_FIXTURE_ROOT, structured, type ConnectedClient } from "./helpers.js";
+import {
+  connectClient,
+  ESM_REEXPORT_FIXTURE_ROOT,
+  PKG_FIXTURE_ROOT,
+  structured,
+  type ConnectedClient
+} from "./helpers.js";
 
 let conn: ConnectedClient;
 
@@ -613,6 +619,45 @@ describe("find_unused_exports — package entry points + edge cases", () => {
     // circular-b.ts (out of this single-file scope), so name-based scanning
     // reports it as unused within scope — documented scope limitation.
     expect(Array.isArray(data.unused)).toBe(true);
+  });
+});
+
+// Regression for the shared resolveRelativeSpecifier fix: a TS-ESM entry that
+// re-exports with the runtime `.js` extension (`export * from "./impl.js"`).
+// Before the fix the `.js` specifier did not map to its `.ts` source, so the
+// star-re-exported module's symbols were wrongly flagged as unused.
+describe("find_unused_exports — TS-ESM `.js` re-export resolution", () => {
+  let esm: ConnectedClient;
+  beforeAll(async () => {
+    esm = await connectClient(ESM_REEXPORT_FIXTURE_ROOT);
+  });
+  afterAll(async () => {
+    await esm.close();
+  });
+
+  it("treats a module star-re-exported via a `.js` specifier as public API", async () => {
+    const data = structured<{ unused: { file: string; name: string }[] }>(
+      (await esm.client.callTool({
+        name: "find_unused_exports",
+        arguments: { target: "**/*.ts" }
+      })) as CallToolResult
+    );
+    const names = data.unused.map((u) => `${u.file}:${u.name}`);
+    // index.ts has `export * from "./impl.js"`: impl.ts is folded into the
+    // entry set (its whole surface is forwarded), so its exports are public.
+    // Under the OLD resolver "./impl.js" did not map to impl.ts, so these were
+    // wrongly flagged as unused.
+    expect(names).not.toContain("src/impl.ts:publicViaStar");
+    expect(names).not.toContain("src/impl.ts:PUBLIC_VALUE");
+    // Control: a named re-export (`export { namedPublic } from "./named.js"`)
+    // is a reachability root and must never be flagged.
+    expect(names).not.toContain("src/named.ts:namedPublic");
+    // extra.ts is reached only by a plain `.js` import from impl.ts (not a star
+    // re-export), so it is a regular in-graph module: its cross-file-used export
+    // is not flagged, but its genuinely-dead export still is — proving the
+    // `.js`->`.ts` rewrite did not blanket-exclude every `.js` target.
+    expect(names).not.toContain("src/extra.ts:usedByImpl");
+    expect(names).toContain("src/extra.ts:deadInExtra");
   });
 });
 

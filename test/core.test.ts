@@ -506,6 +506,27 @@ describe("relative-specifier resolution + star re-export sources", () => {
     expect(resolveRelativeSpecifier("src/main.ts", "./dynamic", known)).toBe("src/dynamic.ts");
   });
 
+  it("rewrites a TS-ESM `.js` specifier to its `.ts`/`.tsx`/`.d.ts` source (NodeNext convention)", () => {
+    // Regression: modern TS-ESM projects write the runtime extension (`./api.js`)
+    // even though the file on disk is `./api.ts`. The shared resolver must map
+    // the JS-family extension back to the TS source — otherwise find_unused_exports
+    // fails to fold a `.js`-specified `export *` target into its public-API set and
+    // wrongly flags that module's exports as unused.
+    expect(resolveRelativeSpecifier("src/main.ts", "./api.js", known)).toBe("src/api.ts");
+    expect(resolveRelativeSpecifier("src/main.ts", "./dynamic.js", known)).toBe("src/dynamic.ts");
+    expect(resolveRelativeSpecifier("src/main.ts", "./lib/aliased.js", known)).toBe("src/lib/aliased.ts");
+    // A `.js` directory specifier still falls back to the directory index source.
+    expect(resolveRelativeSpecifier("src/main.ts", "./features/index.js", known)).toBe("src/features/index.ts");
+    // And an unmatched `.js` specifier must NOT spuriously become "./nope.js.ts".
+    expect(resolveRelativeSpecifier("src/main.ts", "./nope.js", known)).toBeUndefined();
+  });
+
+  it("still resolves a specifier written with its real source extension exactly", () => {
+    // Guard against an over-eager extension append (e.g. "./api.ts" -> "api.ts.ts").
+    expect(resolveRelativeSpecifier("src/main.ts", "./api.ts", known)).toBe("src/api.ts");
+    expect(resolveRelativeSpecifier("src/main.ts", "./features/index.ts", known)).toBe("src/features/index.ts");
+  });
+
   it("resolves a nested-path specifier and a directory index", () => {
     expect(resolveRelativeSpecifier("src/main.ts", "./lib/aliased", known)).toBe("src/lib/aliased.ts");
     // `./features` -> features/index.ts

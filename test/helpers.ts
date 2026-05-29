@@ -44,6 +44,15 @@ export const CYCLE_FIXTURE_ROOT = path.join(here, "fixtures", "cycle-project");
  */
 export const DEAD_FILES_FIXTURE_ROOT = path.join(here, "fixtures", "dead-files-project");
 
+/**
+ * Absolute path to the TS-ESM re-export fixture root: an `index.ts` entry that
+ * re-exports sibling modules using the runtime `.js` extension
+ * (`export * from "./impl.js"`). Used to regression-test that
+ * find_unused_exports rewrites a `.js` specifier to its `.ts` source so a
+ * star-re-exported module's symbols are treated as public API.
+ */
+export const ESM_REEXPORT_FIXTURE_ROOT = path.join(here, "fixtures", "esm-reexport");
+
 /** A ServerContext scoped to the fixture project (for unit-testing core/tools directly). */
 export function fixtureContext(): ServerContext {
   return new ServerContext(FIXTURE_ROOT);

@@ -28,7 +28,8 @@ async function main(): Promise<void> {
         "Transport: stdio (for use by an MCP client such as Claude Desktop).\n" +
         "Tools: list_symbols, get_file_outline, find_references, search_ast,\n" +
         "       analyze_complexity, summarize_module, find_unused_exports,\n" +
-        "       call_graph\n"
+        "       call_graph, import_graph, detect_circular_deps, find_dead_files,\n" +
+        "       api_surface\n"
     );
     return;
   }

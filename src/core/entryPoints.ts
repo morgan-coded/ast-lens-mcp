@@ -122,16 +122,49 @@ export function expandEntryToSourceCandidates(rel: string): string[] {
   return Array.from(candidates);
 }
 
+/** Extensions tried, in order, when resolving an extension-less specifier. */
+const RESOLVE_EXTS = [".ts", ".tsx", ".mts", ".cts", ".d.ts", ".js", ".jsx", ".mjs", ".cjs"];
+
+/**
+ * Map a JS-family import extension to the TS-family source extensions it may
+ * actually resolve to. This is the ESM/NodeNext TypeScript convention where a
+ * specifier is written with a `.js` extension (`import x from "./a.js"`) but the
+ * file on disk is the source `./a.ts`. Without this, every such relative import
+ * in a modern TS-ESM project resolves to nothing — so a symbol used only across
+ * a `.js`-specified import would be wrongly reported as unused. Mirrors the
+ * JS->TS expansion `expandEntryToSourceCandidates` applies to package entries.
+ */
+const JS_TO_TS_EXTS: Record<string, readonly string[]> = {
+  ".js": [".ts", ".tsx", ".d.ts"],
+  ".jsx": [".tsx"],
+  ".mjs": [".mts", ".d.ts"],
+  ".cjs": [".cts", ".d.ts"]
+};
+
+/** Extension of a posix path, lowercased, or "" if none. Recognizes ".d.ts". */
+function posixExt(p: string): string {
+  const base = p.slice(p.lastIndexOf("/") + 1);
+  if (base.endsWith(".d.ts")) return ".d.ts";
+  const dot = base.lastIndexOf(".");
+  return dot > 0 ? base.slice(dot).toLowerCase() : "";
+}
+
 /**
  * Resolve a relative module specifier (`./x`, `../y/z`) referenced FROM a given
  * file to a concrete display path drawn from a known set of files. This is a
  * purely path-based resolution against files already in scope — no filesystem
  * access — so it works on the batch the tool already loaded.
  *
- * Tries, in order: the exact joined path, the joined path with each supported
- * source extension, and `<joined>/index.<ext>`. Returns the first member of
- * `known` that matches, or undefined when nothing in scope satisfies it (bare
- * package specifiers and out-of-scope targets simply do not resolve).
+ * Tries, in order:
+ *   1. the exact joined path (a fully-specified specifier like "./a.ts");
+ *   2. if the path carries a JS-family extension, the TS-family source files it
+ *      may map to under the ESM/NodeNext convention ("./a.js" -> a.ts/a.tsx/…);
+ *   3. the (extension-less) joined path + each supported extension;
+ *   4. `<joined-stem>/index.<ext>` for a directory import.
+ *
+ * Returns the first member of `known` that matches, or undefined when nothing in
+ * scope satisfies it (bare package specifiers and out-of-scope targets simply do
+ * not resolve).
  */
 export function resolveRelativeSpecifier(
   fromDisplayPath: string,
@@ -140,17 +173,37 @@ export function resolveRelativeSpecifier(
 ): string | undefined {
   if (!(spec.startsWith("./") || spec.startsWith("../"))) return undefined;
   const fromDir = path.posix.dirname(fromDisplayPath.replace(/\\/g, "/"));
-  const joined = path.posix.normalize(path.posix.join(fromDir, spec));
   // Guard: a specifier may resolve above the root ("../.."); such a path can
   // never be an in-scope file, and `known` won't contain it, so it is dropped.
-  const exts = [".ts", ".tsx", ".mts", ".cts", ".d.ts", ".js", ".jsx", ".mjs", ".cjs"];
+  const joined = path.posix.normalize(path.posix.join(fromDir, spec));
 
+  // 1. Exact match (specifier written with its real extension).
   if (known.has(joined)) return joined;
-  for (const e of exts) {
-    if (known.has(`${joined}${e}`)) return `${joined}${e}`;
+
+  // 2. JS-family specifier -> TS-family source file (ESM/NodeNext convention).
+  const ext = posixExt(joined);
+  const tsSwaps = ext ? JS_TO_TS_EXTS[ext] : undefined;
+  if (tsSwaps) {
+    const stem = joined.slice(0, joined.length - ext.length);
+    for (const e of tsSwaps) {
+      if (known.has(`${stem}${e}`)) return `${stem}${e}`;
+    }
   }
-  for (const e of exts) {
-    if (known.has(`${joined}/index${e}`)) return `${joined}/index${e}`;
+
+  // 3. Extension-less specifier: append each candidate extension. (When the
+  // specifier already carries an extension we do NOT append more — that would
+  // look for "./a.js.ts" — only the index fallback below remains meaningful.)
+  if (!ext) {
+    for (const e of RESOLVE_EXTS) {
+      if (known.has(`${joined}${e}`)) return `${joined}${e}`;
+    }
+  }
+
+  // 4. Directory index. Use the extension-less stem so "./dir.js" can also fall
+  // back to "dir/index.*" as well as a bare "./dir".
+  const stem = ext ? joined.slice(0, joined.length - ext.length) : joined;
+  for (const e of RESOLVE_EXTS) {
+    if (known.has(`${stem}/index${e}`)) return `${stem}/index${e}`;
   }
   return undefined;
 }
