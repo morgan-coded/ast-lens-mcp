@@ -94,7 +94,7 @@ Or, if installed globally / from source:
 }
 ```
 
-All paths passed to tools are interpreted **relative to the project root** (or absolute, as long as they stay inside it — directory traversal outside the root is refused).
+All paths passed to tools are interpreted **relative to the project root** (or absolute, as long as they stay inside it). Directory traversal outside the root is refused, and so are symlinks that resolve to a location outside the root — the server verifies the real (symlink-resolved) path before reading any file.
 
 ---
 
@@ -307,7 +307,7 @@ scripts/
 Design notes:
 
 - **Robust by construction.** A bad file never crashes a call: the parser returns a structured result, and batch tools collect failures into `parseErrors`. Tools that expect a single file return actionable errors when handed a directory or glob.
-- **Sandboxed.** Tool inputs are confined to the project root; any path that resolves outside it is rejected (`PathEscapeError`).
+- **Sandboxed.** Tool inputs are confined to the project root; any path that resolves outside it — including via a symlink that points out of the tree — is rejected (`PathEscapeError`) before any file is read.
 - **Context-friendly.** Responses carry a 25k-character guard that summarizes oversized payloads and tells the agent how to narrow the query.
 
 ---
