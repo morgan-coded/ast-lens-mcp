@@ -27,7 +27,8 @@ async function main(): Promise<void> {
         "  AST_LENS_PROJECT_ROOT   Project root to analyze (default: cwd)\n\n" +
         "Transport: stdio (for use by an MCP client such as Claude Desktop).\n" +
         "Tools: list_symbols, get_file_outline, find_references, search_ast,\n" +
-        "       analyze_complexity, summarize_module\n"
+        "       analyze_complexity, summarize_module, find_unused_exports,\n" +
+        "       call_graph\n"
     );
     return;
   }

@@ -12,7 +12,14 @@ import {
   toDisplayPath
 } from "../src/core/files.js";
 import { analyzeAllFunctions } from "../src/core/traverse.js";
-import { listSymbols, fileOutline } from "../src/core/extract.js";
+import {
+  buildFileCallGraph,
+  countNameUsages,
+  exportedSymbols,
+  fileOutline,
+  listSymbols,
+  reexportedOriginNames
+} from "../src/core/extract.js";
 import { ServerContext } from "../src/core/context.js";
 import { FIXTURE_ROOT, fixturePath } from "./helpers.js";
 
@@ -231,6 +238,103 @@ describe("symbol extraction edge cases", () => {
     const outline = fileOutline(r.value.ast);
     const node = outline.find((n) => n.name === "default");
     expect(node?.children?.map((c) => c.name)).toEqual(expect.arrayContaining(["make", "go"]));
+  });
+});
+
+describe("exported-symbol extraction (find_unused_exports internals)", () => {
+  function parse(code: string) {
+    const r = parseCode(code, "t.ts");
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("parse failed");
+    return r.value.ast;
+  }
+
+  it("lists named + default exports and skips forwarded re-exports", () => {
+    const ast = parse(
+      [
+        "export function a() {}",
+        "export default function d() {}",
+        "const b = 1; export { b as renamed };",
+        'export { c } from "./other";', // forwarded — skipped
+        'export * from "./star";' // star re-export — kept, flagged
+      ].join("\n")
+    );
+    const exps = exportedSymbols(ast);
+    const byName = new Map(exps.map((e) => [e.name, e]));
+    expect(byName.get("a")?.kind).toBe("named");
+    expect(byName.get("d")?.kind).toBe("default");
+    expect(byName.get("renamed")?.kind).toBe("named");
+    expect(byName.has("c")).toBe(false); // forwarded re-export not declared here
+    expect(byName.get("*")?.reexport).toBe(true);
+  });
+
+  it("counts value/jsx/call references but not import or export-specifier bindings", () => {
+    const ast = parse(
+      [
+        'import { foo } from "./x";', // binding, not a usage
+        "const y = foo();", // usage (call)
+        "const z = foo;", // usage (reference)
+        "export { foo };", // export specifier, not a usage
+        "const obj = { foo: 1 };" // object key, not a usage of the symbol
+      ].join("\n")
+    );
+    const tally = new Map<string, number>();
+    countNameUsages(ast, new Set(["foo"]), tally);
+    expect(tally.get("foo")).toBe(2); // only the call + the bare reference
+  });
+
+  it("does not count a non-computed member-access property name as a usage", () => {
+    const ast = parse("const o = { bar() {} }; o.bar();");
+    const tally = new Map<string, number>();
+    countNameUsages(ast, new Set(["bar"]), tally);
+    // `o.bar` property name is not a free reference to a `bar` symbol.
+    expect(tally.get("bar") ?? 0).toBe(0);
+  });
+
+  it("collects origin-side names of forwarded re-exports (entry-point roots)", () => {
+    const ast = parse('export { a, b as c } from "./x";\nexport * from "./y";');
+    // a (own name) and b (origin of `b as c`); star export is not enumerable.
+    expect(reexportedOriginNames(ast).sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("call-graph construction (call_graph internals)", () => {
+  function parse(code: string) {
+    const r = parseCode(code, "f.ts");
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("parse failed");
+    return r.value.ast;
+  }
+
+  it("creates a node per function and an edge per call to its enclosing function", () => {
+    const ast = parse(
+      ["function a() { return b(); }", "function b() { return 1; }", "a();"].join("\n")
+    );
+    const { nodes, edges } = buildFileCallGraph(ast, "f.ts");
+    expect(nodes.map((n) => n.name).sort()).toEqual(["a", "b"]);
+    // a -> b inside function a.
+    const aToB = edges.find((e) => e.callee === "b");
+    expect(aToB?.from).toMatch(/f\.ts#a@1/);
+    // top-level a() -> from is null.
+    const topA = edges.find((e) => e.callee === "a" && e.from === null);
+    expect(topA).toBeDefined();
+  });
+
+  it("resolves member-call callees to a dotted name and leaves cross-file resolution to the caller", () => {
+    const ast = parse("function f() { service.create(); console.log('x'); }");
+    const { edges } = buildFileCallGraph(ast, "f.ts");
+    const callees = edges.map((e) => e.callee).sort();
+    expect(callees).toEqual(["console.log", "service.create"]);
+    // buildFileCallGraph never resolves `to` itself.
+    expect(edges.every((e) => e.to === null)).toBe(true);
+  });
+
+  it("attributes a call inside a nested function to the nearest enclosing function", () => {
+    const ast = parse("function outer() { function inner() { helper(); } }");
+    const { nodes, edges } = buildFileCallGraph(ast, "f.ts");
+    const innerId = nodes.find((n) => n.name === "inner")?.id;
+    const edge = edges.find((e) => e.callee === "helper");
+    expect(edge?.from).toBe(innerId);
   });
 });
 

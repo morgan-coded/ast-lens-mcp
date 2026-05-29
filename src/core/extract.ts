@@ -5,19 +5,26 @@
  * on a single parsed AST and produce the structured shapes the tools return.
  */
 import * as t from "@babel/types";
+import type { NodePath } from "@babel/traverse";
 import { spanOf } from "./parser.js";
 import {
   classMemberSymbol,
+  functionDisplayName,
+  type FunctionLike,
   kindOfDeclaration,
   makeSymbol,
   modifiersOf,
-  namesOfDeclaration
+  namesOfDeclaration,
+  traverse
 } from "./traverse.js";
 import type {
+  CallGraphEdge,
+  CallGraphNode,
   ExportInfo,
   ImportInfo,
   ModuleSummary,
   OutlineNode,
+  Span,
   SymbolInfo
 } from "./types.js";
 
@@ -347,6 +354,216 @@ function collectDynamicDeps(ast: t.File, depSet: Set<string>): void {
 /** A specifier is "local" when it is a relative or absolute path import. */
 function isLocalSpecifier(spec: string): boolean {
   return spec.startsWith(".") || spec.startsWith("/");
+}
+
+/** A symbol a module exports, in a shape convenient for unused-export analysis. */
+export interface ExportedSymbol {
+  /** Public name (the exported, possibly-renamed name). */
+  name: string;
+  kind: ExportInfo["kind"];
+  span: Span;
+  /** True for a bare `export * from "..."` (no nameable binding to check). */
+  reexport: boolean;
+}
+
+/**
+ * List the names a module exports, for unused-export analysis.
+ *
+ * Re-exports that forward another module's binding (`export { x } from "./y"`)
+ * are skipped: the symbol is not declared here, so "is it used" is a question
+ * about the original module, not this file. A bare `export * from "..."` is
+ * reported with `reexport: true` because it cannot be resolved to a name here.
+ */
+export function exportedSymbols(ast: t.File): ExportedSymbol[] {
+  const summary = summarizeModule(ast, "");
+  const out: ExportedSymbol[] = [];
+  for (const exp of summary.exports) {
+    if (exp.name === "*") {
+      out.push({ name: "*", kind: exp.kind, span: exp.span, reexport: true });
+      continue;
+    }
+    // `export { x } from "./y"` / `export * as ns from "./y"` forward another
+    // module's binding; skip — they are not declared in this file.
+    if (exp.source) continue;
+    out.push({ name: exp.name, kind: exp.kind, span: exp.span, reexport: false });
+  }
+  return out;
+}
+
+/**
+ * Names that this module forwards from ANOTHER module via a re-export
+ * specifier — `export { a } from "./y"` yields the origin-side name `a`, and
+ * `export { a as b } from "./y"` also yields `a` (the name as it exists in the
+ * source module). Used to treat entry-point re-exports as reachability roots so
+ * a symbol re-exported by a public entry point is not reported as unused.
+ *
+ * Bare `export * from "./y"` cannot be enumerated by name here and is omitted
+ * (documented limitation of the name-based check).
+ */
+export function reexportedOriginNames(ast: t.File): string[] {
+  const names: string[] = [];
+  for (const stmt of ast.program.body) {
+    if (t.isExportNamedDeclaration(stmt) && stmt.source) {
+      for (const spec of stmt.specifiers) {
+        if (t.isExportSpecifier(spec)) {
+          names.push(spec.local.name);
+        }
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * Count "real" usages of each name in `names` within one AST, where a real
+ * usage is any identifier occurrence that is NOT a declaration site and NOT an
+ * import/export binding. This mirrors find_references' classification but is
+ * tuned for reachability: imports and re-export specifiers do not count as
+ * "using" a symbol, only value/type/jsx references and call sites do.
+ *
+ * `tally` is mutated in place (name -> running count) so callers can accumulate
+ * across many files.
+ */
+export function countNameUsages(ast: t.File, names: Set<string>, tally: Map<string, number>): void {
+  if (names.size === 0) return;
+  traverse(ast, {
+    "Identifier|JSXIdentifier"(path) {
+      const node = path.node as t.Identifier | t.JSXIdentifier;
+      if (!names.has(node.name)) return;
+      if (isNonUsageOccurrence(path as NodePath<t.Identifier | t.JSXIdentifier>)) return;
+      tally.set(node.name, (tally.get(node.name) ?? 0) + 1);
+    }
+  });
+}
+
+/**
+ * True when an identifier occurrence is a binding/declaration position rather
+ * than a usage: declaration ids, import specifiers, export specifiers, and
+ * object-member *keys* (which are property names, not references to a symbol).
+ */
+function isNonUsageOccurrence(path: NodePath<t.Identifier | t.JSXIdentifier>): boolean {
+  const node = path.node;
+  const parent = path.parent;
+
+  // Declaration sites.
+  if ((t.isFunctionDeclaration(parent) || t.isClassDeclaration(parent)) && parent.id === node) return true;
+  if (
+    (t.isTSInterfaceDeclaration(parent) ||
+      t.isTSTypeAliasDeclaration(parent) ||
+      t.isTSEnumDeclaration(parent) ||
+      t.isTSDeclareFunction(parent)) &&
+    (parent as { id?: t.Node }).id === node
+  ) {
+    return true;
+  }
+  if (t.isVariableDeclarator(parent) && parent.id === node) return true;
+
+  // Import bindings (`import { X }`, `import X`, `import * as X`).
+  if (
+    t.isImportSpecifier(parent) ||
+    t.isImportDefaultSpecifier(parent) ||
+    t.isImportNamespaceSpecifier(parent)
+  ) {
+    return true;
+  }
+
+  // Export specifiers: `export { X }` / `export { X as Y }`. Neither the local
+  // nor the exported identifier counts as a usage of the symbol.
+  if (t.isExportSpecifier(parent) || t.isExportNamespaceSpecifier(parent)) return true;
+
+  // Object/class member *keys* are names, not references — unless computed.
+  if (
+    (t.isObjectProperty(parent) ||
+      t.isObjectMethod(parent) ||
+      t.isClassProperty(parent) ||
+      t.isClassMethod(parent) ||
+      t.isClassPrivateProperty(parent) ||
+      t.isClassPrivateMethod(parent) ||
+      t.isTSPropertySignature(parent) ||
+      t.isTSMethodSignature(parent)) &&
+    (parent as { key?: t.Node; computed?: boolean }).key === node &&
+    !(parent as { computed?: boolean }).computed
+  ) {
+    return true;
+  }
+
+  // Non-computed member access property (`obj.foo` — `foo` is not a free ref).
+  if (
+    (t.isMemberExpression(parent) || t.isOptionalMemberExpression(parent)) &&
+    parent.property === node &&
+    !parent.computed
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Build a function call graph for a single file.
+ *
+ * Nodes are every function-like definition (declarations, expressions, arrows,
+ * class/object methods) with a stable id. Edges connect a call site to the
+ * enclosing function node (or `null` for top-level calls) and carry the callee
+ * name as written; resolution of the callee to a node id is left to the caller,
+ * which has the cross-file picture. Callee names are resolved with the same
+ * best-effort logic search_ast uses (bare names + member paths, incl. optional
+ * chaining).
+ */
+export function buildFileCallGraph(
+  ast: t.File,
+  file: string
+): { nodes: CallGraphNode[]; edges: CallGraphEdge[] } {
+  const nodes: CallGraphNode[] = [];
+  const edges: CallGraphEdge[] = [];
+
+  // Map each function-like NodePath to its node id so a call site can find its
+  // nearest enclosing function.
+  const idByFnNode = new Map<t.Node, string>();
+
+  traverse(ast, {
+    Function(path) {
+      const fnPath = path as NodePath<FunctionLike>;
+      const { name, kind } = functionDisplayName(fnPath);
+      const span = spanOf(fnPath.node);
+      const id = `${file}#${name}@${span.start.line}`;
+      idByFnNode.set(fnPath.node, id);
+      nodes.push({ id, name, file, kind, span });
+    },
+    "CallExpression|OptionalCallExpression|NewExpression"(path) {
+      const node = path.node as t.CallExpression | t.OptionalCallExpression | t.NewExpression;
+      const callee = calleeName(node.callee as t.Expression);
+      if (!callee) return;
+      const from = enclosingFunctionId(path, idByFnNode);
+      edges.push({ from, callee, to: null, file, span: spanOf(node) });
+    }
+  });
+
+  return { nodes, edges };
+}
+
+/** Walk up from a call site to the id of the nearest enclosing function node. */
+function enclosingFunctionId(path: NodePath, idByFnNode: Map<t.Node, string>): string | null {
+  let current: NodePath | null = path.parentPath;
+  while (current) {
+    const id = idByFnNode.get(current.node);
+    if (id !== undefined) return id;
+    current = current.parentPath;
+  }
+  return null;
+}
+
+/** Build a dotted name for a callee expression (bare name or member path),
+ * handling optional chaining. Mirrors the resolver in search_ast. */
+function calleeName(node: t.Expression | t.V8IntrinsicIdentifier | t.PrivateName): string | undefined {
+  if (t.isIdentifier(node)) return node.name;
+  if ((t.isMemberExpression(node) || t.isOptionalMemberExpression(node)) && !node.computed) {
+    const obj = calleeName(node.object as t.Expression);
+    const prop = t.isIdentifier(node.property) ? node.property.name : undefined;
+    if (obj && prop) return `${obj}.${prop}`;
+    if (prop) return prop;
+  }
+  return undefined;
 }
 
 // Re-export modifiersOf for tools that build symbols directly.

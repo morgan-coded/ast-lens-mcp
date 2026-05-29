@@ -46,14 +46,16 @@ async function main() {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     console.error(`Server reported ${tools.length} tools: ${names.join(", ")}`);
-    assert(tools.length === 6, "exposes 6 tools");
+    assert(tools.length === 8, "exposes 8 tools");
     for (const expected of [
       "list_symbols",
       "get_file_outline",
       "find_references",
       "search_ast",
       "analyze_complexity",
-      "summarize_module"
+      "summarize_module",
+      "find_unused_exports",
+      "call_graph"
     ]) {
       assert(names.includes(expected), `tool present: ${expected}`);
     }
@@ -79,6 +81,20 @@ async function main() {
     assert(
       cx.structuredContent && cx.structuredContent.totalFunctions > 0,
       `analyze_complexity scanned ${cx.structuredContent?.totalFunctions ?? 0} functions (max complexity ${cx.structuredContent?.maxComplexity})`
+    );
+
+    // Build a call graph of the core directory.
+    const cg = await client.callTool({ name: "call_graph", arguments: { target: "src/core" } });
+    assert(
+      cg.structuredContent && cg.structuredContent.nodeCount > 0,
+      `call_graph(src/core) found ${cg.structuredContent?.nodeCount ?? 0} functions, ${cg.structuredContent?.edgeCount ?? 0} edges`
+    );
+
+    // Scan the project's own source for unused exports (name-based; informational).
+    const ue = await client.callTool({ name: "find_unused_exports", arguments: { target: "src" } });
+    assert(
+      ue.structuredContent && Array.isArray(ue.structuredContent.unused),
+      `find_unused_exports(src) scanned ${ue.structuredContent?.scanned ?? 0} files, ${ue.structuredContent?.total ?? 0} candidates`
     );
 
     console.error("\nSmoke test PASSED — server boots, lists tools, and answers tool calls over stdio.");

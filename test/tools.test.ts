@@ -17,13 +17,15 @@ function call(name: string, args: Record<string, unknown>): Promise<CallToolResu
 }
 
 describe("server registration", () => {
-  it("lists all six tools with schemas and annotations", async () => {
+  it("lists all eight tools with schemas and annotations", async () => {
     const { tools } = await conn.client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
         "analyze_complexity",
+        "call_graph",
         "find_references",
+        "find_unused_exports",
         "get_file_outline",
         "list_symbols",
         "search_ast",
@@ -353,6 +355,143 @@ describe("summarize_module", () => {
   it("errors when target is not a single file", async () => {
     const res = await call("summarize_module", { file: "src" });
     expect(res.isError).toBe(true);
+  });
+});
+
+describe("find_unused_exports", () => {
+  it("flags exports never referenced from another file in scope", async () => {
+    const data = structured<{
+      total: number;
+      totalExports: number;
+      scanned: number;
+      unused: { file: string; name: string; exportKind: string; reexport: boolean }[];
+    }>(await call("find_unused_exports", { target: "src/unused" }));
+
+    const names = data.unused.map((u) => u.name);
+    // onlyUsedInternally is exported but only referenced within lib.ts -> unused.
+    expect(names).toContain("onlyUsedInternally");
+    // trulyUnused is never referenced anywhere -> unused.
+    expect(names).toContain("trulyUnused");
+    // usedAcrossFile IS imported by consumer.ts -> not flagged.
+    expect(names).not.toContain("usedAcrossFile");
+    // run is re-exported by the entry point index.ts -> reachable public API.
+    expect(names).not.toContain("run");
+    // helperInternal is not exported at all -> never in the report.
+    expect(names).not.toContain("helperInternal");
+  });
+
+  it("treats index.* as an entry point whose own exports are not flagged", async () => {
+    const data = structured<{ unused: { name: string }[] }>(
+      await call("find_unused_exports", { target: "src/unused" })
+    );
+    // entryOnlyExport lives in index.ts and is used nowhere, but entry-point
+    // exports are public API and excluded by default.
+    expect(data.unused.map((u) => u.name)).not.toContain("entryOnlyExport");
+  });
+
+  it("flags everything (incl. entry-point exports) when entryPoints=[]", async () => {
+    const data = structured<{ unused: { name: string }[] }>(
+      await call("find_unused_exports", { target: "src/unused", entryPoints: [] })
+    );
+    const names = data.unused.map((u) => u.name);
+    expect(names).toContain("entryOnlyExport");
+    expect(names).toContain("run");
+  });
+
+  it("skips forwarded re-exports but surfaces bare `export *` only with includeReexports", async () => {
+    const without = structured<{ unused: { name: string; reexport: boolean }[] }>(
+      await call("find_unused_exports", { target: "src/unused" })
+    );
+    expect(without.unused.some((u) => u.reexport)).toBe(false);
+    // `export { Role } from "../models"` is a forwarded binding, never flagged.
+    expect(without.unused.map((u) => u.name)).not.toContain("Role");
+
+    const withRe = structured<{ unused: { name: string; reexport: boolean }[] }>(
+      await call("find_unused_exports", { target: "src/unused", includeReexports: true })
+    );
+    expect(withRe.unused.some((u) => u.reexport && u.name === "*")).toBe(true);
+  });
+
+  it("respects the limit", async () => {
+    const data = structured<{ count: number; total: number; truncated: boolean }>(
+      await call("find_unused_exports", { target: "src/unused", limit: 1 })
+    );
+    expect(data.count).toBe(1);
+    expect(data.total).toBeGreaterThan(1);
+    expect(data.truncated).toBe(true);
+  });
+});
+
+describe("call_graph", () => {
+  it("builds nodes for every function and resolves intra-graph edges", async () => {
+    const data = structured<{
+      nodeCount: number;
+      edgeCount: number;
+      unresolvedCallees: number;
+      nodes: { id: string; name: string; file: string }[];
+      edges: { from: string | null; callee: string; to: string | null }[];
+    }>(await call("call_graph", { target: "src/graph" }));
+
+    // alpha, beta, usesCallback, <anonymous>, fetchThing, helper, inner.
+    expect(data.nodeCount).toBe(7);
+    expect(data.nodes.map((n) => n.name)).toEqual(
+      expect.arrayContaining(["alpha", "beta", "usesCallback", "<anonymous>", "fetchThing", "helper", "inner"])
+    );
+
+    const byCallee = (c: string) => data.edges.filter((e) => e.callee === c);
+    // Cross-file edge alpha -> helper resolves to the helper node.
+    const alphaToHelper = byCallee("helper").find((e) => e.from?.includes("alpha"));
+    expect(alphaToHelper?.to).toMatch(/more\.ts#helper@/);
+    // Recursive self-edge beta -> beta.
+    const betaSelf = byCallee("beta").find((e) => e.from?.includes("beta"));
+    expect(betaSelf?.to).toMatch(/calls\.ts#beta@/);
+
+    // External callees (fetch, items.map) are unresolved (2 distinct names).
+    expect(data.unresolvedCallees).toBe(2);
+  });
+
+  it("excludes external (unresolved) call edges by default, includes them on request", async () => {
+    const def = structured<{ edges: { callee: string; to: string | null }[] }>(
+      await call("call_graph", { target: "src/graph" })
+    );
+    expect(def.edges.every((e) => e.to !== null)).toBe(true);
+    expect(def.edges.some((e) => e.callee === "fetch")).toBe(false);
+
+    const withExt = structured<{ edges: { callee: string; to: string | null }[] }>(
+      await call("call_graph", { target: "src/graph", includeExternalCalls: true })
+    );
+    const fetchEdge = withExt.edges.find((e) => e.callee === "fetch");
+    expect(fetchEdge).toBeDefined();
+    expect(fetchEdge?.to).toBeNull();
+  });
+
+  it("records a top-level call with from=null", async () => {
+    const data = structured<{ edges: { from: string | null; callee: string; to: string | null }[] }>(
+      await call("call_graph", { target: "src/graph" })
+    );
+    const topLevel = data.edges.find((e) => e.from === null && e.callee === "alpha");
+    expect(topLevel).toBeDefined();
+    expect(topLevel?.to).toMatch(/calls\.ts#alpha@/);
+  });
+
+  it("can omit anonymous functions and their dangling edges", async () => {
+    const data = structured<{ nodes: { name: string; id: string }[]; edges: { from: string | null }[] }>(
+      await call("call_graph", { target: "src/graph", includeAnonymous: false, includeExternalCalls: true })
+    );
+    expect(data.nodes.some((n) => n.name === "<anonymous>")).toBe(false);
+    const nodeIds = new Set(data.nodes.map((n) => n.id));
+    // No edge should originate from a node that was excluded.
+    expect(data.edges.every((e) => e.from === null || nodeIds.has(e.from))).toBe(true);
+  });
+
+  it("size-guards by capping combined nodes+edges and flags truncation", async () => {
+    const data = structured<{ nodeCount: number; nodes: unknown[]; edges: unknown[]; truncated: boolean }>(
+      await call("call_graph", { target: "src/graph", limit: 7 })
+    );
+    // 7 nodes fill the budget exactly, leaving no room for edges.
+    expect(data.nodes).toHaveLength(7);
+    expect(data.edges).toHaveLength(0);
+    expect(data.truncated).toBe(true);
   });
 });
 
