@@ -141,3 +141,41 @@ export interface ParseErrorInfo {
   message: string;
   position?: Position;
 }
+
+/** An exported symbol that has no detected use outside its declaring file. */
+export interface UnusedExportInfo {
+  /** The file that declares/exports the symbol (relative to root). */
+  file: string;
+  /** The exported name (the public name, e.g. the renamed name in `export { a as b }`). */
+  name: string;
+  /** How it leaves the module. */
+  exportKind: ExportKind;
+  /** True when this is a bare star re-export (`export * from "..."`), which cannot be name-checked. */
+  reexport: boolean;
+  span: Span;
+}
+
+/** A node in a function call graph: a single function-like definition. */
+export interface CallGraphNode {
+  /** Stable id: `<file>#<name>@<line>` so same-named functions in different files/lines are distinct. */
+  id: string;
+  /** Best-effort function/method name (or "<anonymous>"). */
+  name: string;
+  /** File that defines the function (relative to root). */
+  file: string;
+  kind: SymbolKind;
+  span: Span;
+}
+
+/** A directed edge in a call graph: `from` (a function node id) calls `callee`. */
+export interface CallGraphEdge {
+  /** Node id of the calling function, or null when the call sits at module top level. */
+  from: string | null;
+  /** The callee name as written (bare "fetch" or member path "console.log"). */
+  callee: string;
+  /** Node id of the callee when it resolves to a function defined in scope, else null. */
+  to: string | null;
+  /** Source location of the call site (relative to the calling file). */
+  file: string;
+  span: Span;
+}

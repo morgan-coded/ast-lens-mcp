@@ -7,14 +7,20 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import path from "node:path";
 import { ServerContext } from "./core/context.js";
 import { registerAnalyzeComplexity } from "./tools/analyzeComplexity.js";
+import { registerApiSurface } from "./tools/apiSurface.js";
+import { registerCallGraph } from "./tools/callGraph.js";
+import { registerDetectCircularDeps } from "./tools/detectCircularDeps.js";
+import { registerFindDeadFiles } from "./tools/findDeadFiles.js";
 import { registerFindReferences } from "./tools/findReferences.js";
+import { registerFindUnusedExports } from "./tools/findUnusedExports.js";
 import { registerGetFileOutline } from "./tools/getFileOutline.js";
+import { registerImportGraph } from "./tools/importGraph.js";
 import { registerListSymbols } from "./tools/listSymbols.js";
 import { registerSearchAst } from "./tools/searchAst.js";
 import { registerSummarizeModule } from "./tools/summarizeModule.js";
 
 export const SERVER_NAME = "ast-lens-mcp-server";
-export const SERVER_VERSION = "0.1.0";
+export const SERVER_VERSION = "0.2.0";
 
 export interface CreateServerOptions {
   /** Absolute project root that all tools are confined to. */
@@ -52,7 +58,11 @@ export function createServer(opts: CreateServerOptions): McpServer {
         "ast-lens-mcp provides structural code intelligence for a TypeScript/JavaScript project via AST analysis. " +
         "Prefer these tools over reading whole files when you need to understand structure: list_symbols and " +
         "get_file_outline for shape, find_references for usages, search_ast for structural patterns and code smells, " +
-        "analyze_complexity for refactor targets, and summarize_module for a file's imports/exports/dependencies. " +
+        "analyze_complexity for refactor targets, summarize_module for a file's imports/exports/dependencies, " +
+        "find_unused_exports for dead public surface, find_dead_files for orphan modules (files no one imports), " +
+        "call_graph for function call relationships, import_graph for module import/export resolution edges, " +
+        "detect_circular_deps for circular import dependencies (cycles in the module graph), and " +
+        "api_surface for a package's public API (the symbols reachable from its entry points, with signatures). " +
         "All paths are relative to the configured project root; node_modules and build output are ignored automatically."
     }
   );
@@ -65,6 +75,12 @@ export function createServer(opts: CreateServerOptions): McpServer {
   registerSearchAst(server, ctx);
   registerAnalyzeComplexity(server, ctx);
   registerSummarizeModule(server, ctx);
+  registerFindUnusedExports(server, ctx);
+  registerFindDeadFiles(server, ctx);
+  registerCallGraph(server, ctx);
+  registerImportGraph(server, ctx);
+  registerDetectCircularDeps(server, ctx);
+  registerApiSurface(server, ctx);
 
   return server;
 }

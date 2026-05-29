@@ -12,8 +12,22 @@ import {
   toDisplayPath
 } from "../src/core/files.js";
 import { analyzeAllFunctions } from "../src/core/traverse.js";
-import { listSymbols, fileOutline } from "../src/core/extract.js";
+import {
+  buildFileCallGraph,
+  countNameUsages,
+  exportedSymbols,
+  fileOutline,
+  listSymbols,
+  reexportedOriginNames,
+  starReexportSources
+} from "../src/core/extract.js";
 import { ServerContext } from "../src/core/context.js";
+import { CHARACTER_LIMIT, ResponseFormat, toolResult } from "../src/core/response.js";
+import {
+  expandEntryToSourceCandidates,
+  resolvePackageEntryPoints,
+  resolveRelativeSpecifier
+} from "../src/core/entryPoints.js";
 import { FIXTURE_ROOT, fixturePath } from "./helpers.js";
 
 describe("parser", () => {
@@ -234,6 +248,103 @@ describe("symbol extraction edge cases", () => {
   });
 });
 
+describe("exported-symbol extraction (find_unused_exports internals)", () => {
+  function parse(code: string) {
+    const r = parseCode(code, "t.ts");
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("parse failed");
+    return r.value.ast;
+  }
+
+  it("lists named + default exports and skips forwarded re-exports", () => {
+    const ast = parse(
+      [
+        "export function a() {}",
+        "export default function d() {}",
+        "const b = 1; export { b as renamed };",
+        'export { c } from "./other";', // forwarded — skipped
+        'export * from "./star";' // star re-export — kept, flagged
+      ].join("\n")
+    );
+    const exps = exportedSymbols(ast);
+    const byName = new Map(exps.map((e) => [e.name, e]));
+    expect(byName.get("a")?.kind).toBe("named");
+    expect(byName.get("d")?.kind).toBe("default");
+    expect(byName.get("renamed")?.kind).toBe("named");
+    expect(byName.has("c")).toBe(false); // forwarded re-export not declared here
+    expect(byName.get("*")?.reexport).toBe(true);
+  });
+
+  it("counts value/jsx/call references but not import or export-specifier bindings", () => {
+    const ast = parse(
+      [
+        'import { foo } from "./x";', // binding, not a usage
+        "const y = foo();", // usage (call)
+        "const z = foo;", // usage (reference)
+        "export { foo };", // export specifier, not a usage
+        "const obj = { foo: 1 };" // object key, not a usage of the symbol
+      ].join("\n")
+    );
+    const tally = new Map<string, number>();
+    countNameUsages(ast, new Set(["foo"]), tally);
+    expect(tally.get("foo")).toBe(2); // only the call + the bare reference
+  });
+
+  it("does not count a non-computed member-access property name as a usage", () => {
+    const ast = parse("const o = { bar() {} }; o.bar();");
+    const tally = new Map<string, number>();
+    countNameUsages(ast, new Set(["bar"]), tally);
+    // `o.bar` property name is not a free reference to a `bar` symbol.
+    expect(tally.get("bar") ?? 0).toBe(0);
+  });
+
+  it("collects origin-side names of forwarded re-exports (entry-point roots)", () => {
+    const ast = parse('export { a, b as c } from "./x";\nexport * from "./y";');
+    // a (own name) and b (origin of `b as c`); star export is not enumerable.
+    expect(reexportedOriginNames(ast).sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("call-graph construction (call_graph internals)", () => {
+  function parse(code: string) {
+    const r = parseCode(code, "f.ts");
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("parse failed");
+    return r.value.ast;
+  }
+
+  it("creates a node per function and an edge per call to its enclosing function", () => {
+    const ast = parse(
+      ["function a() { return b(); }", "function b() { return 1; }", "a();"].join("\n")
+    );
+    const { nodes, edges } = buildFileCallGraph(ast, "f.ts");
+    expect(nodes.map((n) => n.name).sort()).toEqual(["a", "b"]);
+    // a -> b inside function a.
+    const aToB = edges.find((e) => e.callee === "b");
+    expect(aToB?.from).toMatch(/f\.ts#a@1/);
+    // top-level a() -> from is null.
+    const topA = edges.find((e) => e.callee === "a" && e.from === null);
+    expect(topA).toBeDefined();
+  });
+
+  it("resolves member-call callees to a dotted name and leaves cross-file resolution to the caller", () => {
+    const ast = parse("function f() { service.create(); console.log('x'); }");
+    const { edges } = buildFileCallGraph(ast, "f.ts");
+    const callees = edges.map((e) => e.callee).sort();
+    expect(callees).toEqual(["console.log", "service.create"]);
+    // buildFileCallGraph never resolves `to` itself.
+    expect(edges.every((e) => e.to === null)).toBe(true);
+  });
+
+  it("attributes a call inside a nested function to the nearest enclosing function", () => {
+    const ast = parse("function outer() { function inner() { helper(); } }");
+    const { nodes, edges } = buildFileCallGraph(ast, "f.ts");
+    const innerId = nodes.find((n) => n.name === "inner")?.id;
+    const edge = edges.find((e) => e.callee === "helper");
+    expect(edge?.from).toBe(innerId);
+  });
+});
+
 describe("symlink sandbox escape", () => {
   let root: string;
   let outside: string;
@@ -283,5 +394,225 @@ describe("symlink sandbox escape", () => {
   it("loadBatch refuses to read a secret through an in-root symlink", async () => {
     const ctx = new ServerContext(root);
     await expect(ctx.loadBatch("src/link/secret.ts")).rejects.toBeInstanceOf(PathEscapeError);
+  });
+});
+
+describe("package entry-point resolution", () => {
+  it("maps a dist build-output entry back to likely source candidates", () => {
+    const cands = expandEntryToSourceCandidates("dist/index.js");
+    // literal kept, source-dir rebased, TS extensions added, .d.ts considered.
+    expect(cands).toContain("dist/index.js");
+    expect(cands).toContain("src/index.ts");
+    expect(cands).toContain("src/index.d.ts");
+    expect(cands).toContain("source/index.ts");
+    expect(cands).toContain("index.ts"); // build dir stripped, no source dir
+  });
+
+  it("maps a nested build path preserving the subpath", () => {
+    const cands = expandEntryToSourceCandidates("dist/cli/main.mjs");
+    expect(cands).toContain("src/cli/main.ts");
+    expect(cands).toContain("src/cli/main.mts");
+    expect(cands).toContain("dist/cli/main.mjs");
+  });
+
+  it("keeps a source entry (src/api.ts) as-is without inventing build dirs", () => {
+    const cands = expandEntryToSourceCandidates("src/api.ts");
+    expect(cands).toContain("src/api.ts");
+    // It is not under a build dir, so we only keep the body+TS ext, not rebased
+    // copies under other source dirs.
+    expect(cands).not.toContain("dist/api.ts");
+  });
+
+  it("keeps a .d.ts types entry verbatim (type-fest style)", () => {
+    const cands = expandEntryToSourceCandidates("index.d.ts");
+    expect(cands).toContain("index.d.ts");
+  });
+
+  it("returns not-found for a directory with no package.json", async () => {
+    const res = await resolvePackageEntryPoints(fixturePath());
+    // sample-project fixture has no package.json.
+    expect(res.found).toBe(false);
+    expect(res.declared).toEqual([]);
+    expect(res.sourceCandidates).toEqual([]);
+  });
+
+  it("reads main/module/bin/exports from a temp package.json without throwing", async () => {
+    const base = await fs.realpath(os.tmpdir());
+    const dir = path.join(base, `ast-lens-pkg-${process.pid}-${Date.now()}`);
+    await fs.mkdir(dir, { recursive: true });
+    try {
+      await fs.writeFile(
+        path.join(dir, "package.json"),
+        JSON.stringify({
+          name: "demo",
+          main: "./dist/index.js",
+          module: "./dist/index.mjs",
+          bin: { demo: "./dist/cli.js" },
+          exports: {
+            ".": { types: "./dist/index.d.ts", import: "./dist/index.mjs", require: "./dist/index.cjs" },
+            "./feature": "./dist/feature.js"
+          }
+        })
+      );
+      const res = await resolvePackageEntryPoints(dir);
+      expect(res.found).toBe(true);
+      // Declared paths normalized (leading ./ stripped). The `types` condition
+      // value is collected too — a .d.ts entry is a real public-API root.
+      expect(res.declared).toEqual(
+        expect.arrayContaining([
+          "dist/index.js",
+          "dist/index.mjs",
+          "dist/cli.js",
+          "dist/index.cjs",
+          "dist/feature.js",
+          "dist/index.d.ts"
+        ])
+      );
+      // Source candidates include mapped-back forms for matching against src.
+      expect(res.sourceCandidates).toEqual(
+        expect.arrayContaining(["src/index.ts", "src/cli.ts", "src/feature.ts"])
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not throw on malformed package.json", async () => {
+    const base = await fs.realpath(os.tmpdir());
+    const dir = path.join(base, `ast-lens-pkg-bad-${process.pid}-${Date.now()}`);
+    await fs.mkdir(dir, { recursive: true });
+    try {
+      await fs.writeFile(path.join(dir, "package.json"), "{ not valid json ");
+      const res = await resolvePackageEntryPoints(dir);
+      expect(res.found).toBe(false);
+      expect(res.sourceCandidates).toEqual([]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("relative-specifier resolution + star re-export sources", () => {
+  const known = new Set([
+    "src/main.ts",
+    "src/api.ts",
+    "src/dynamic.ts",
+    "src/lib/aliased.ts",
+    "src/features/index.ts"
+  ]);
+
+  it("resolves a sibling relative specifier with extension inference", () => {
+    expect(resolveRelativeSpecifier("src/main.ts", "./api", known)).toBe("src/api.ts");
+    expect(resolveRelativeSpecifier("src/main.ts", "./dynamic", known)).toBe("src/dynamic.ts");
+  });
+
+  it("rewrites a TS-ESM `.js` specifier to its `.ts`/`.tsx`/`.d.ts` source (NodeNext convention)", () => {
+    // Regression: modern TS-ESM projects write the runtime extension (`./api.js`)
+    // even though the file on disk is `./api.ts`. The shared resolver must map
+    // the JS-family extension back to the TS source — otherwise find_unused_exports
+    // fails to fold a `.js`-specified `export *` target into its public-API set and
+    // wrongly flags that module's exports as unused.
+    expect(resolveRelativeSpecifier("src/main.ts", "./api.js", known)).toBe("src/api.ts");
+    expect(resolveRelativeSpecifier("src/main.ts", "./dynamic.js", known)).toBe("src/dynamic.ts");
+    expect(resolveRelativeSpecifier("src/main.ts", "./lib/aliased.js", known)).toBe("src/lib/aliased.ts");
+    // A `.js` directory specifier still falls back to the directory index source.
+    expect(resolveRelativeSpecifier("src/main.ts", "./features/index.js", known)).toBe("src/features/index.ts");
+    // And an unmatched `.js` specifier must NOT spuriously become "./nope.js.ts".
+    expect(resolveRelativeSpecifier("src/main.ts", "./nope.js", known)).toBeUndefined();
+  });
+
+  it("still resolves a specifier written with its real source extension exactly", () => {
+    // Guard against an over-eager extension append (e.g. "./api.ts" -> "api.ts.ts").
+    expect(resolveRelativeSpecifier("src/main.ts", "./api.ts", known)).toBe("src/api.ts");
+    expect(resolveRelativeSpecifier("src/main.ts", "./features/index.ts", known)).toBe("src/features/index.ts");
+  });
+
+  it("resolves a nested-path specifier and a directory index", () => {
+    expect(resolveRelativeSpecifier("src/main.ts", "./lib/aliased", known)).toBe("src/lib/aliased.ts");
+    // `./features` -> features/index.ts
+    expect(resolveRelativeSpecifier("src/main.ts", "./features", known)).toBe("src/features/index.ts");
+  });
+
+  it("returns undefined for bare package specifiers and out-of-scope targets", () => {
+    expect(resolveRelativeSpecifier("src/main.ts", "react", known)).toBeUndefined();
+    expect(resolveRelativeSpecifier("src/main.ts", "./nope", known)).toBeUndefined();
+    expect(resolveRelativeSpecifier("src/main.ts", "../../escape", known)).toBeUndefined();
+  });
+
+  it("extracts only bare `export *` sources (not named re-exports)", () => {
+    const r = parseCode(
+      [
+        'export * from "./a";',
+        'export { x } from "./b";', // named — not a star
+        'export * as ns from "./c";', // namespace star — not a bare star
+        'export * from "./d";'
+      ].join("\n"),
+      "m.ts"
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(starReexportSources(r.value.ast).sort()).toEqual(["./a", "./d"]);
+  });
+});
+
+describe("toolResult character-limit handling", () => {
+  it("attaches the full structured payload below the limit", () => {
+    const res = toolResult({ a: 1, items: [1, 2, 3] }, { format: ResponseFormat.JSON });
+    expect(res.structuredContent).toEqual({ a: 1, items: [1, 2, 3] });
+    expect((res.structuredContent as { responseTextTruncated?: boolean }).responseTextTruncated).toBeUndefined();
+  });
+
+  it("summarizes only the TEXT when over the limit, keeping structuredContent complete", () => {
+    // Build a payload whose JSON rendering exceeds CHARACTER_LIMIT but whose
+    // structured data is fully retained.
+    const big = Array.from({ length: 5000 }, (_, i) => ({ id: `node-${i}`, v: i }));
+    const res = toolResult(
+      { nodeCount: big.length, truncated: false, nodes: big },
+      { format: ResponseFormat.JSON, narrowHint: "Narrow it." }
+    );
+    const sc = res.structuredContent as {
+      truncated: boolean;
+      responseTextTruncated: boolean;
+      nodes: unknown[];
+    };
+    // The tool's own data-level flag is preserved (NOT clobbered to true)...
+    expect(sc.truncated).toBe(false);
+    // ...and the complete node list is still present in structuredContent.
+    expect(sc.nodes).toHaveLength(5000);
+    // The presentation-only flag marks that the TEXT was summarized.
+    expect(sc.responseTextTruncated).toBe(true);
+    // The text content is the compact notice, not the full payload.
+    const text = (res.content[0] as { text: string }).text;
+    expect(text.length).toBeLessThan(CHARACTER_LIMIT);
+    expect(text).toContain("responseTextTruncated");
+    expect(text).toContain("structuredContent");
+  });
+});
+
+describe("entry-point default covers .d.ts barrels (regression)", () => {
+  it("resolves a top-level `types` field as a public-API root", async () => {
+    const base = await fs.realpath(os.tmpdir());
+    const dir = path.join(base, `ast-lens-dts-${process.pid}-${Date.now()}`);
+    await fs.mkdir(dir, { recursive: true });
+    try {
+      // type-fest shape: types-only package, no runtime main.
+      await fs.writeFile(
+        path.join(dir, "package.json"),
+        JSON.stringify({
+          name: "types-pkg",
+          types: "./index.d.ts",
+          exports: { ".": { types: "./index.d.ts" }, "./globals": { types: "./source/globals/index.d.ts" } }
+        })
+      );
+      const res = await resolvePackageEntryPoints(dir);
+      expect(res.found).toBe(true);
+      // The declaration entries are recognized as roots (top-level `types` and
+      // the per-subpath `types` condition both collected).
+      expect(res.declared).toEqual(
+        expect.arrayContaining(["index.d.ts", "source/globals/index.d.ts"])
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });

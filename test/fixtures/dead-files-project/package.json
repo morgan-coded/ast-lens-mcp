@@ -1,0 +1,9 @@
+{
+  "name": "dead-files-project",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "df-cli": "./dist/cli.js"
+  }
+}
