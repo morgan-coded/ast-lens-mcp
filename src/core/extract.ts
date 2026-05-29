@@ -47,20 +47,34 @@ function unwrapExport(stmt: TopLevel): { inner: t.Declaration | undefined; ctx: 
   return { inner: undefined, ctx: { exported: false, exportKind: "none" } };
 }
 
-/** Names exported via `export { a, b as c }` (without an inline declaration). */
-function collectNamedSpecifierExports(program: t.Program): Map<string, ExportInfo> {
-  const map = new Map<string, ExportInfo>();
+/**
+ * Map a file's *local* declaration names to how they are exported via a bare
+ * `export { a, b as c }` clause (no inline declaration, no `from` source).
+ *
+ * Keyed by the LOCAL name (`a`, `b`) because that is what a top-level
+ * declaration is named in this file — callers match a declaration's own name
+ * against this map. The exported (possibly renamed) name is preserved in
+ * `exportedAs` so output can show `export { local as exportedAs }`.
+ *
+ * Re-exports with a `from` source (`export { x } from "./y"`) are skipped: they
+ * do not correspond to a local declaration in this file.
+ */
+interface SpecifierExport {
+  exportedAs: string;
+  typeOnly: boolean;
+}
+
+function collectNamedSpecifierExports(program: t.Program): Map<string, SpecifierExport> {
+  const map = new Map<string, SpecifierExport>();
   for (const stmt of program.body) {
-    if (t.isExportNamedDeclaration(stmt) && !stmt.declaration) {
+    if (t.isExportNamedDeclaration(stmt) && !stmt.declaration && !stmt.source) {
       for (const spec of stmt.specifiers) {
         if (t.isExportSpecifier(spec)) {
-          const name = t.isIdentifier(spec.exported) ? spec.exported.name : spec.exported.value;
-          map.set(name, {
-            name,
-            kind: stmt.source ? "named" : "named",
-            ...(stmt.source ? { source: stmt.source.value } : {}),
-            typeOnly: stmt.exportKind === "type" || spec.exportKind === "type",
-            span: spanOf(spec)
+          const local = spec.local.name;
+          const exportedAs = t.isIdentifier(spec.exported) ? spec.exported.name : spec.exported.value;
+          map.set(local, {
+            exportedAs,
+            typeOnly: stmt.exportKind === "type" || spec.exportKind === "type"
           });
         }
       }
@@ -98,6 +112,12 @@ export function listSymbols(ast: t.File): SymbolInfo[] {
     const kind = kindOfDeclaration(inner);
     if (!kind) continue;
     const names = namesOfDeclaration(inner);
+    // Anonymous `export default class {}` / `export default function () {}`:
+    // the declaration has no id, but it is still the module's default export.
+    if (names.length === 0 && ctx.exportKind === "default") {
+      symbols.push(makeSymbol("default", kind, inner, true, "default"));
+      continue;
+    }
     for (const name of names) {
       const exportedBySpecifier = specifierExports.has(name);
       const exported = ctx.exported || exportedBySpecifier;
@@ -122,8 +142,12 @@ export function fileOutline(ast: t.File): OutlineNode[] {
     if (!kind) continue;
 
     const names = namesOfDeclaration(inner);
-    for (const name of names) {
-      const exportedBySpecifier = specifierExports.has(name);
+    // Anonymous `export default class {}` still gets an outline node named
+    // "default" (with its members expanded below).
+    const outlineNames = names.length === 0 && ctx.exportKind === "default" ? ["default"] : names;
+    for (const name of outlineNames) {
+      const isAnonDefault = names.length === 0;
+      const exportedBySpecifier = !isAnonDefault && specifierExports.has(name);
       const exported = ctx.exported || exportedBySpecifier;
       const exportKind = ctx.exported ? ctx.exportKind : exportedBySpecifier ? "named" : "none";
       const node: OutlineNode = makeSymbol(name, kind, inner, exported, exportKind);

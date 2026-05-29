@@ -166,10 +166,14 @@ Errors:
   );
 }
 
-/** Build a dotted name for a callee expression (best-effort). */
+/** Build a dotted name for a callee expression (best-effort).
+ *
+ * Handles both regular member access (`a.b`) and optional chaining
+ * (`a?.b`, `a?.b()`): an optional call's callee is an OptionalMemberExpression,
+ * so without this a `logger?.log()` call would be missed entirely. */
 function calleeName(node: t.Expression | t.V8IntrinsicIdentifier | t.PrivateName): string | undefined {
   if (t.isIdentifier(node)) return node.name;
-  if (t.isMemberExpression(node) && !node.computed) {
+  if ((t.isMemberExpression(node) || t.isOptionalMemberExpression(node)) && !node.computed) {
     const obj = calleeName(node.object as t.Expression);
     const prop = t.isIdentifier(node.property) ? node.property.name : undefined;
     if (obj && prop) return `${obj}.${prop}`;

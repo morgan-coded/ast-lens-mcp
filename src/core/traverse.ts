@@ -51,6 +51,10 @@ function functionKind(node: t.Node): SymbolKind {
  */
 export function kindOfDeclaration(node: t.Node): SymbolKind | undefined {
   if (t.isFunctionDeclaration(node)) return "function";
+  // Ambient/overload signatures: `declare function f(): void`,
+  // `export declare function f(): void`, and TS function overload signatures
+  // parse as TSDeclareFunction (no body). They still name a module symbol.
+  if (t.isTSDeclareFunction(node)) return "function";
   if (t.isClassDeclaration(node)) return "class";
   if (t.isTSInterfaceDeclaration(node)) return "interface";
   if (t.isTSTypeAliasDeclaration(node)) return "type";
@@ -67,6 +71,7 @@ export function kindOfDeclaration(node: t.Node): SymbolKind | undefined {
 export function namesOfDeclaration(node: t.Node): string[] {
   if (
     t.isFunctionDeclaration(node) ||
+    t.isTSDeclareFunction(node) ||
     t.isClassDeclaration(node) ||
     t.isTSInterfaceDeclaration(node) ||
     t.isTSTypeAliasDeclaration(node) ||
