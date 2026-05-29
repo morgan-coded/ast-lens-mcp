@@ -5,6 +5,14 @@
   "type": "module",
   "license": "MIT",
   "author": "Morgan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/morgan-coded/ast-lens-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/morgan-coded/ast-lens-mcp/issues"
+  },
+  "homepage": "https://github.com/morgan-coded/ast-lens-mcp#readme",
   "keywords": [
     "mcp",
     "model-context-protocol",
