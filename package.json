@@ -1,0 +1,58 @@
+{
+  "name": "ast-lens-mcp",
+  "version": "0.1.0",
+  "description": "An MCP server that gives AI agents structural understanding of TypeScript/JavaScript codebases via AST analysis — list symbols, outline files, find references, run AST queries, measure complexity, and summarize modules without reading whole files.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Morgan",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ast",
+    "babel",
+    "static-analysis",
+    "typescript",
+    "javascript",
+    "code-intelligence",
+    "llm",
+    "ai-tools"
+  ],
+  "bin": {
+    "ast-lens-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke": "node scripts/smoke.mjs",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.29.7",
+    "@babel/traverse": "^7.29.7",
+    "@babel/types": "^7.29.7",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "fast-glob": "^3.3.3",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/babel__traverse": "^7.28.0",
+    "@types/node": "^22.10.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.7"
+  }
+}
