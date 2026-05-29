@@ -11,6 +11,7 @@ import { registerCallGraph } from "./tools/callGraph.js";
 import { registerFindReferences } from "./tools/findReferences.js";
 import { registerFindUnusedExports } from "./tools/findUnusedExports.js";
 import { registerGetFileOutline } from "./tools/getFileOutline.js";
+import { registerImportGraph } from "./tools/importGraph.js";
 import { registerListSymbols } from "./tools/listSymbols.js";
 import { registerSearchAst } from "./tools/searchAst.js";
 import { registerSummarizeModule } from "./tools/summarizeModule.js";
@@ -70,6 +71,7 @@ export function createServer(opts: CreateServerOptions): McpServer {
   registerSummarizeModule(server, ctx);
   registerFindUnusedExports(server, ctx);
   registerCallGraph(server, ctx);
+  registerImportGraph(server, ctx);
 
   return server;
 }

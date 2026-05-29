@@ -19,6 +19,15 @@ export const FIXTURE_ROOT = path.join(here, "fixtures", "sample-project");
  */
 export const PKG_FIXTURE_ROOT = path.join(here, "fixtures", "pkg-project");
 
+/**
+ * Absolute path to the import-graph fixture root: a small project exercising
+ * relative imports, directory-index resolution, a tsconfig path alias (wildcard
+ * + explicit-file), a re-export chain (`export *` and named re-export), a
+ * dynamic import(), an external (node_modules) import, and an unresolved import.
+ * Used to assert the import_graph tool's resolution + edge classification.
+ */
+export const IMPORT_GRAPH_FIXTURE_ROOT = path.join(here, "fixtures", "import-graph");
+
 /** A ServerContext scoped to the fixture project (for unit-testing core/tools directly). */
 export function fixtureContext(): ServerContext {
   return new ServerContext(FIXTURE_ROOT);
