@@ -46,7 +46,7 @@ async function main() {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     console.error(`Server reported ${tools.length} tools: ${names.join(", ")}`);
-    assert(tools.length === 12, "exposes 12 tools");
+    assert(tools.length === 13, "exposes 13 tools");
     for (const expected of [
       "list_symbols",
       "get_file_outline",
@@ -59,7 +59,8 @@ async function main() {
       "import_graph",
       "detect_circular_deps",
       "find_dead_files",
-      "api_surface"
+      "api_surface",
+      "compare_implementations"
     ]) {
       assert(names.includes(expected), `tool present: ${expected}`);
     }

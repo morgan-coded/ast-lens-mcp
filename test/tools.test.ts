@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   connectClient,
+  COMPARE_FIXTURE_ROOT,
   ESM_REEXPORT_FIXTURE_ROOT,
   PKG_FIXTURE_ROOT,
   structured,
@@ -23,7 +24,7 @@ function call(name: string, args: Record<string, unknown>): Promise<CallToolResu
 }
 
 describe("server registration", () => {
-  it("lists all twelve tools with schemas and annotations", async () => {
+  it("lists all thirteen tools with schemas and annotations", async () => {
     const { tools } = await conn.client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
@@ -31,6 +32,7 @@ describe("server registration", () => {
         "analyze_complexity",
         "api_surface",
         "call_graph",
+        "compare_implementations",
         "detect_circular_deps",
         "find_dead_files",
         "find_references",
@@ -47,6 +49,92 @@ describe("server registration", () => {
       expect(tool.inputSchema).toBeTruthy();
       expect(tool.annotations?.readOnlyHint).toBe(true);
     }
+  });
+});
+
+describe("compare_implementations", () => {
+  interface Metrics {
+    functions: number;
+    maxComplexity: number;
+    averageComplexity: number;
+    emptyCatch: number;
+    consoleCalls: number;
+    nonNullAssertions: number;
+    todoComments: number;
+    anyAnnotations: number;
+  }
+  interface CompareResult {
+    left: { label: string; metrics: Metrics; parseErrors: unknown[] };
+    right: { label: string; metrics: Metrics; parseErrors: unknown[] };
+    dimensions: { name: string; winner: "left" | "right" | "tie"; leftValue: number; rightValue: number }[];
+    score: { left: number; right: number };
+    recommendation: string;
+    rationale: string[];
+    caveats: string[];
+  }
+
+  let compareConn: ConnectedClient;
+  beforeAll(async () => {
+    compareConn = await connectClient(COMPARE_FIXTURE_ROOT);
+  });
+  afterAll(async () => {
+    await compareConn.close();
+  });
+  const compareCall = (args: Record<string, unknown>) =>
+    compareConn.client.callTool({ name: "compare_implementations", arguments: args }) as Promise<CallToolResult>;
+
+  it("recommends the structurally cleaner implementation and exposes the per-dimension tally", async () => {
+    const data = structured<CompareResult>(
+      await compareCall({ left: "clean.ts", right: "messy.ts", leftLabel: "clean", rightLabel: "messy" })
+    );
+
+    expect(data.recommendation).toBe("prefer_left");
+    expect(data.score.left).toBeGreaterThan(data.score.right);
+
+    // The messy side's smell signals are detected.
+    expect(data.right.metrics.emptyCatch).toBe(1);
+    expect(data.right.metrics.consoleCalls).toBe(1);
+    expect(data.right.metrics.nonNullAssertions).toBe(1);
+    expect(data.right.metrics.todoComments).toBe(1);
+    expect(data.right.metrics.anyAnnotations).toBeGreaterThanOrEqual(5);
+    expect(data.right.metrics.maxComplexity).toBeGreaterThan(data.left.metrics.maxComplexity);
+
+    // The clean side wins the complexity dimension; rationale is human-readable.
+    const avg = data.dimensions.find((d) => d.name === "averageComplexity");
+    expect(avg?.winner).toBe("left");
+    expect(data.rationale.some((r) => r.toLowerCase().includes("complexity"))).toBe(true);
+
+    // Caveats are first-class output, stating these are structural signals only.
+    expect(data.caveats.length).toBeGreaterThanOrEqual(3);
+    expect(data.caveats.some((c) => /structural/i.test(c))).toBe(true);
+  });
+
+  it("is symmetric: swapping the sides flips the recommendation", async () => {
+    const data = structured<CompareResult>(await compareCall({ left: "messy.ts", right: "clean.ts" }));
+    expect(data.recommendation).toBe("prefer_right");
+    expect(data.score.right).toBeGreaterThan(data.score.left);
+  });
+
+  it("reports 'comparable' when a file is compared against itself", async () => {
+    const data = structured<CompareResult>(await compareCall({ left: "clean.ts", right: "clean.ts" }));
+    expect(data.recommendation).toBe("comparable");
+    expect(data.score.left).toBe(0);
+    expect(data.score.right).toBe(0);
+    expect(data.dimensions.every((d) => d.winner === "tie")).toBe(true);
+  });
+
+  it("reports 'insufficient_signal' when neither side defines a function", async () => {
+    const data = structured<CompareResult>(await compareCall({ left: "empty.ts", right: "empty.ts" }));
+    expect(data.recommendation).toBe("insufficient_signal");
+    expect(data.left.metrics.functions).toBe(0);
+  });
+
+  it("renders a markdown comparison table on request", async () => {
+    const res = await compareCall({ left: "clean.ts", right: "messy.ts", response_format: "markdown" });
+    const text = (res.content?.[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("# Compare");
+    expect(text).toContain("| Dimension |");
+    expect(text).toContain("Recommendation");
   });
 });
 

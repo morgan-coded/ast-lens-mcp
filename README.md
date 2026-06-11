@@ -116,6 +116,7 @@ Every tool is read-only (`readOnlyHint: true`, `openWorldHint: false`), validate
 | 10 | `detect_circular_deps` | Circular dependencies in the module graph |
 | 11 | `find_dead_files` | Source files not reachable from package or index entry points |
 | 12 | `api_surface` | Public symbols reachable from a package or entry file |
+| 13 | `compare_implementations` | Two candidate solutions to one task, compared on structural signals (preference-ranking / rubric review support) |
 
 ### 1. `list_symbols`
 
@@ -435,6 +436,30 @@ The public API reachable from a package directory or a single entry file. It fol
 ```
 
 Pass `target: "."` for a package root, or an explicit file such as `src/server.ts` when you want one entry file only.
+
+### 13. `compare_implementations`
+
+Compares two implementations of the same functionality — for example, two candidate solutions to one task — on objective, AST-derived structural signals, and returns a side-by-side table plus a transparent preference recommendation. Each signal is a deterministic count (cyclomatic complexity, empty `catch` blocks, `console.*` calls, TS `any` annotations, non-null assertions, TODO/FIXME markers, parameter counts, error-handling). The recommendation is an auditable per-dimension tally with the weights included in the output.
+
+This is decision support for a "which solution is better, and why" judgment, not a correctness verdict — the output's `caveats` say so explicitly, and the metrics do not detect logic bugs, missing requirements, performance, or security issues. Run the candidates' own tests for ground truth.
+
+```jsonc
+// input
+{ "left": "solutions/a.ts", "right": "solutions/b.ts", "leftLabel": "a", "rightLabel": "b" }
+
+// output (abridged)
+{
+  "left":  { "label": "a", "metrics": { "averageComplexity": 1.67, "emptyCatch": 0, "anyAnnotations": 0, "maxParams": 2 } },
+  "right": { "label": "b", "metrics": { "averageComplexity": 8, "emptyCatch": 1, "anyAnnotations": 6, "maxParams": 5 } },
+  "dimensions": [ { "name": "averageComplexity", "weight": 2, "leftValue": 1.67, "rightValue": 8, "winner": "left" } ],
+  "score": { "left": 10, "right": 0 },
+  "recommendation": "prefer_left",
+  "rationale": [ "a has lower average complexity (1.67 vs 8).", "a has fewer empty catch blocks (0 vs 1)." ],
+  "caveats": [ "These are objective STRUCTURAL signals, not a correctness or behavior judgment — run the candidates' own tests for ground truth." ]
+}
+```
+
+`recommendation` is one of `prefer_left`, `prefer_right`, `comparable` (no measurable structural edge), or `insufficient_signal` (neither side defines a function).
 
 ---
 

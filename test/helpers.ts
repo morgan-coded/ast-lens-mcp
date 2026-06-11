@@ -53,6 +53,14 @@ export const DEAD_FILES_FIXTURE_ROOT = path.join(here, "fixtures", "dead-files-p
  */
 export const ESM_REEXPORT_FIXTURE_ROOT = path.join(here, "fixtures", "esm-reexport");
 
+/**
+ * Absolute path to the compare-implementations fixture root: two files
+ * (clean.ts, messy.ts) implementing the same task with very different
+ * structural quality, plus a types-only empty.ts. Used to exercise
+ * compare_implementations' rubric tally and recommendation states.
+ */
+export const COMPARE_FIXTURE_ROOT = path.join(here, "fixtures", "compare-project");
+
 /** A ServerContext scoped to the fixture project (for unit-testing core/tools directly). */
 export function fixtureContext(): ServerContext {
   return new ServerContext(FIXTURE_ROOT);

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Adds a thirteenth tool, `compare_implementations`.
+
+- `compare_implementations` compares two implementations of the same functionality (e.g. two candidate solutions to one task) on objective, AST-derived structural signals — cyclomatic complexity, empty `catch` blocks, `console.*` calls, TS `any` annotations, non-null assertions, TODO/FIXME markers, parameter counts, and error-handling — and returns a side-by-side table plus a transparent, auditable preference recommendation (`prefer_left` / `prefer_right` / `comparable` / `insufficient_signal`). The output includes explicit caveats: the signals are structural only and are not a correctness verdict.
+
+Verification: `npm run typecheck`, `npm test` (183 tests), `npm run build`, and `npm run smoke` (13 tools exposed and exercised).
+
 ## 0.2.0 - 2026-05-29
 
 This release expands `ast-lens-mcp` from eight tools to twelve.

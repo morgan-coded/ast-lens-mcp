@@ -9,6 +9,7 @@ import { ServerContext } from "./core/context.js";
 import { registerAnalyzeComplexity } from "./tools/analyzeComplexity.js";
 import { registerApiSurface } from "./tools/apiSurface.js";
 import { registerCallGraph } from "./tools/callGraph.js";
+import { registerCompareImplementations } from "./tools/compareImplementations.js";
 import { registerDetectCircularDeps } from "./tools/detectCircularDeps.js";
 import { registerFindDeadFiles } from "./tools/findDeadFiles.js";
 import { registerFindReferences } from "./tools/findReferences.js";
@@ -61,8 +62,9 @@ export function createServer(opts: CreateServerOptions): McpServer {
         "analyze_complexity for refactor targets, summarize_module for a file's imports/exports/dependencies, " +
         "find_unused_exports for dead public surface, find_dead_files for orphan modules (files no one imports), " +
         "call_graph for function call relationships, import_graph for module import/export resolution edges, " +
-        "detect_circular_deps for circular import dependencies (cycles in the module graph), and " +
-        "api_surface for a package's public API (the symbols reachable from its entry points, with signatures). " +
+        "detect_circular_deps for circular import dependencies (cycles in the module graph), " +
+        "api_surface for a package's public API (the symbols reachable from its entry points, with signatures), and " +
+        "compare_implementations to compare two candidate solutions to the same task on objective structural signals (preference-ranking / rubric review support). " +
         "All paths are relative to the configured project root; node_modules and build output are ignored automatically."
     }
   );
@@ -81,6 +83,7 @@ export function createServer(opts: CreateServerOptions): McpServer {
   registerImportGraph(server, ctx);
   registerDetectCircularDeps(server, ctx);
   registerApiSurface(server, ctx);
+  registerCompareImplementations(server, ctx);
 
   return server;
 }
