@@ -2,7 +2,7 @@
 
 > An MCP server that gives AI agents **structural understanding** of a TypeScript / JavaScript codebase — so an agent can *query* code structure instead of reading whole files into its context window.
 
-`ast-lens-mcp` parses your project with the Babel AST toolchain and exposes twelve focused, read-only tools over the [Model Context Protocol](https://modelcontextprotocol.io). Point it at a project root and an LLM client (Claude Desktop, Cursor, or anything that speaks MCP) can ask precise structural questions: *what symbols are exported here? where is this function called? which functions are too complex? what does this module import? what exports or files look dead? what does this package expose?* — all without paging entire files through the model.
+`ast-lens-mcp` parses your project with the Babel AST toolchain and exposes a focused set of read-only tools over the [Model Context Protocol](https://modelcontextprotocol.io). Point it at a project root and an LLM client (Claude Desktop, Cursor, or anything that speaks MCP) can ask precise structural questions: *what symbols are exported here? where is this function called? which functions are too complex? what does this module import? what exports or files look dead? what does this package expose?* — all without paging entire files through the model.
 
 It runs entirely on your **local files**. No API keys, no network calls, no credentials.
 
